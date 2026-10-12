@@ -2536,7 +2536,7 @@ wheels = [
 
 [[package]]
 name = "uk-address-matcher"
-version = "1.3.0"
+version = "1.4.0"
 source = { editable = "." }
 dependencies = [
     { name = "duckdb" },
@@ -2575,7 +2575,7 @@ model-training = [
 
 [package.metadata]
 requires-dist = [
-    { name = "duckdb", specifier = ">=1.3.2,<2.0" },
+    { name = "duckdb", specifier = ">=1.5.0,<2.0" },
     { name = "splink", specifier = ">=4.0.16,<5" },
     { name = "sqlglot", specifier = "==26.6.0" },
 ]
