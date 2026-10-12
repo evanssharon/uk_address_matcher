@@ -536,6 +536,8 @@ def clean_data_pre_term_frequencies(
     con: DuckDBPyConnection,
     num_of_chunks: int = 10,
     *,
+    _drop_columns: Collection[str] = (),
+    _owned_chunks: dict[str, int] | None = None,
     debug_options: DebugOptions | None = None,
     show_progress: ShowProgress = "auto",
 ) -> DuckDBPyRelation:
@@ -639,7 +641,20 @@ def clean_data_pre_term_frequencies(
                 debug_options=debug_options if chunk_index == 0 else None,
             )
 
-            processed_chunk.create(f"{cleaned_chunk_prefix}{chunk_index}")
+            if _drop_columns:
+                processed_chunk = processed_chunk.project(
+                    ", ".join(
+                        f'"{column}"'
+                        for column in processed_chunk.columns
+                        if column not in _drop_columns
+                    )
+                )
+            chunk_name = f"{cleaned_chunk_prefix}{chunk_index}"
+            processed_chunk.create(chunk_name)
+            if _owned_chunks is not None:
+                # Explicitly transfer owned tables and inclusive ID bounds to
+                # finishing; arbitrary caller-owned relations are never enrolled.
+                _owned_chunks[chunk_name] = chunk_offsets[chunk_index] + chunk_row_count
 
             processed_records += chunk_row_count
             progress.update(
@@ -1098,6 +1113,8 @@ def prepare_data_for_matching(
     *,
     dataset_role: Literal["messy", "canonical"] | None = None,
     _precleaned_addresses: bool = False,
+    _drop_columns: Collection[str] = (),
+    _owned_chunks: dict[str, int] | None = None,
     debug_options: DebugOptions | None = None,
     show_progress: ShowProgress = "auto",
 ) -> DuckDBPyRelation:
@@ -1349,12 +1366,42 @@ def prepare_data_for_matching(
                 debug_options=debug_options if chunk_index == 0 else None,
                 narrow_post_tf=True,
             )
+            if _drop_columns:
+                processed_chunk = processed_chunk.project(
+                    ", ".join(
+                        f'"{column}"'
+                        for column in processed_chunk.columns
+                        if column not in _drop_columns
+                    )
+                )
 
             if chunk_index == 0:
                 con.execute(f"DROP TABLE IF EXISTS {processed_table}")
                 processed_chunk.create(processed_table)
             else:
                 processed_chunk.insert_into(processed_table)
+
+            # Global TF and adjacent features are already materialised. Once
+            # these IDs are written, only the remaining source chunks are live.
+            completed = [
+                name
+                for name, maximum in (_owned_chunks or {}).items()
+                if maximum <= last_id
+            ]
+            if completed:
+                remaining = [name for name in _owned_chunks if name not in completed]
+                if remaining:
+                    union_sql = " UNION ALL ".join(
+                        f"SELECT * FROM {name}" for name in remaining
+                    )
+                    con.execute(
+                        f"CREATE OR REPLACE VIEW {cleaned_table_name} AS {union_sql}"
+                    )
+                else:
+                    _drop_table_and_registered_aliases(con, cleaned_table_name)
+                for name in completed:
+                    _drop_table_and_registered_aliases(con, name)
+                    del _owned_chunks[name]
 
             processed_records = min((chunk_index + 1) * chunk_size, total_rows)
             progress.update(
