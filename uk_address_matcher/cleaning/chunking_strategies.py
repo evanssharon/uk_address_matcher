@@ -877,6 +877,27 @@ def _derive_term_frequencies_from_precleaned(
     return con.table(result_table)
 
 
+def _index_keys_have_collation(con: DuckDBPyConnection, keys: DuckDBPyRelation) -> bool:
+    if con.execute("SELECT current_setting('default_collation')").fetchone()[0] not in (
+        "",
+        "binary",
+    ):
+        return True
+    name = f"__ukam_index_collation_{_uid()}"
+    try:
+        # CTAS exposes bound column collations that logical VARCHAR types omit.
+        con.execute(
+            f"CREATE TEMPORARY TABLE {name} AS "
+            f"SELECT unique_id, key FROM ({keys.sql_query()}) LIMIT 0"
+        )
+        ddl = con.execute(
+            "SELECT sql FROM duckdb_tables() WHERE table_name = ?", [name]
+        ).fetchone()[0]
+        return " COLLATE " in ddl.upper()
+    finally:
+        _drop_table_and_registered_aliases(con, name)
+
+
 def derive_inverted_index(
     cleaned_address_table: DuckDBPyRelation,
     con: DuckDBPyConnection,
@@ -1005,6 +1026,8 @@ def derive_inverted_index(
                 num_of_chunks,
                 progress_mode=progress_mode,
             )
+            key_directory = TemporaryDirectory(prefix="ukam-index-buckets-")
+            key_path = None
             try:
                 logger.debug("%s: staging keys once", stage_label)
                 key_pipeline = create_sql_pipeline(
@@ -1032,21 +1055,47 @@ def derive_inverted_index(
                         key,
                         abs(hash(key)) % {num_of_chunks} AS key_bucket
                     FROM scalar_keys
-                    ORDER BY key_bucket
                 """)
-                _materialise_relation(
-                    con,
-                    scalar_keys,
-                    strategy_keys_table,
-                )
+                # Keep native storage for collations and identifier types
+                # whose Parquet round trip is not safe (for example HUGEINT).
+                if str(scalar_keys.types[0]) not in {
+                    "BIGINT",
+                    "VARCHAR",
+                } or _index_keys_have_collation(con, scalar_keys):
+                    _materialise_relation(
+                        con, scalar_keys.order("key_bucket"), strategy_keys_table
+                    )
+                else:
+                    # Physical buckets avoid a global sort while keeping
+                    # each unchanged bucket query local to its own files.
+                    key_path = Path(key_directory.name) / "keys"
+                    escaped_path = str(key_path).replace("'", "''")
+                    con.execute(f"""
+                        COPY ({scalar_keys.sql_query()}) TO '{escaped_path}'
+                        (FORMAT PARQUET, PARTITION_BY (key_bucket), COMPRESSION SNAPPY)
+                    """)
                 logger.debug("%s: keys staged", stage_label)
 
                 for chunk_index in range(num_of_chunks):
-                    chunk_keys = con.sql(f"""
-                        SELECT unique_id, key
-                        FROM {strategy_keys_table}
-                        WHERE key_bucket = {chunk_index}
-                    """)
+                    if key_path is not None:
+                        # Select only this bucket's files; never infer columns
+                        # from ancestor directories such as unique_id=999.
+                        files = sorted(
+                            (key_path / f"key_bucket={chunk_index}").glob("*.parquet")
+                        )
+                        chunk_keys = (
+                            con.read_parquet(
+                                [str(p) for p in files], hive_partitioning=False
+                            )
+                            if files
+                            else scalar_keys.select("unique_id, key").limit(0)
+                        )
+                    else:
+                        chunk_keys = con.sql(f"""
+                            SELECT unique_id, key
+                            FROM {strategy_keys_table}
+                            WHERE key_bucket = {chunk_index}
+                        """)
 
                     pipeline = create_sql_pipeline(
                         con,
@@ -1085,8 +1134,13 @@ def derive_inverted_index(
                         total_chunks=num_of_chunks,
                     )
             finally:
-                progress.close()
-                _drop_table_and_registered_aliases(con, strategy_keys_table)
+                try:
+                    progress.close()
+                    _drop_table_and_registered_aliases(con, strategy_keys_table)
+                finally:
+                    # Bucket results have been inserted before their files
+                    # disappear; no lazy reader outlives its input.
+                    key_directory.cleanup()
 
             log_stage_complete(
                 stage_label,
