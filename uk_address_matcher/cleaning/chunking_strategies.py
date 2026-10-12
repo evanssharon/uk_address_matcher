@@ -8,7 +8,10 @@ from typing import TYPE_CHECKING, Literal, Optional
 
 from duckdb import DuckDBPyConnection, DuckDBPyRelation
 
-from uk_address_matcher.cleaning.materialisation import _CanonicalIntermediates
+from uk_address_matcher.cleaning.materialisation import (
+    _CanonicalIntermediates,
+    _input_has_collation,
+)
 from uk_address_matcher.cleaning.pipelines import (
     QUEUE_FOR_TF_DERIVATION,
     QUEUE_INVERTED_INDEX_SELF,
@@ -1279,12 +1282,14 @@ def _materialise_canonical_distinguishing_features(
     """).fetchone()
     # Other types (notably HUGEINT) may change values when written to Parquet.
     unique_id_type = str(source.types[source.columns.index("unique_id")])
+    columns = "ukam_address_id, unique_id, clean_full_address, clean_full_address_tokens"
     if (
         batch_count <= 1
         or unique_id_type not in {"VARCHAR", "BIGINT", "INTEGER"}
         or collation not in ("", "binary")
         or order not in ("ASC", "ASCENDING")
         or null_order not in ("NULLS_LAST", "NULLS_LAST_ON_ASC_FIRST_ON_DESC")
+        or _input_has_collation(con, source.project(columns))
     ):
         # Consolidate global UNION input; Parquet batches already have this boundary.
         adjacent_input = con.sql(f"""
@@ -1306,7 +1311,6 @@ def _materialise_canonical_distinguishing_features(
     uid = _uid()
     bounds_table = f"__ukam_adjacent_bounds_{uid}"
     input_table = f"__ukam_adjacent_batch_{uid}"
-    columns = "ukam_address_id, unique_id, clean_full_address, clean_full_address_tokens"
     source_sql = source.project(columns).sql_query()
     # Hash-sample a bounded number of addresses; sort only that small sample.
     modulus = max(1, rows // 65_536)

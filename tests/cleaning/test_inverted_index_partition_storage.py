@@ -112,9 +112,9 @@ def test_partitioned_index_preserves_collations(duck_con, monkeypatch, field, co
     materialisations = []
     original = cs._materialise_relation
 
-    def record(con, relation, name):
+    def record(con, relation, name, **kwargs):
         materialisations.append(name)
-        return original(con, relation, name)
+        return original(con, relation, name, **kwargs)
 
     monkeypatch.setattr(cs, "_materialise_relation", record)
     candidate = cs.derive_inverted_index(source, duck_con, num_of_chunks=3)

@@ -121,3 +121,25 @@ def test_adjacent_batch_failure_cleans_files_and_partial_output(
         name == "partial" or "__ukam_adjacent_" in name
         for (name,) in duck_con.sql("SHOW TABLES").fetchall()
     )
+
+
+def test_collated_adjacent_input_keeps_native_comparisons(duck_con, monkeypatch):
+    source = _source(duck_con).project(
+        "ukam_address_id, CASE WHEN ukam_address_id % 2 = 0 THEN 'a' "
+        "ELSE 'A' END COLLATE NOCASE AS unique_id, "
+        "clean_full_address, clean_full_address_tokens"
+    )
+    baseline = cs._materialise_canonical_distinguishing_features(
+        duck_con, source, "baseline"
+    )
+
+    def no_scatter(*args, **kwargs):
+        pytest.fail("Collated input must retain native storage")
+
+    monkeypatch.setattr(cs, "TemporaryDirectory", no_scatter)
+    monkeypatch.setattr(cs, "_CANONICAL_ADJACENT_BATCH_ROWS", 12)
+    result = cs._materialise_canonical_distinguishing_features(duck_con, source, "result")
+    assert (
+        result.order("ukam_address_id").fetchall()
+        == baseline.order("ukam_address_id").fetchall()
+    )
