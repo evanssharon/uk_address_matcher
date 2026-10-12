@@ -65,3 +65,65 @@ def test_partition_files_removed_after_aggregation_failure(
     """)
     with pytest.raises(RuntimeError, match="injected bucket aggregation failure"):
         cs.derive_inverted_index(source, duck_con, num_of_chunks=5)
+
+
+@pytest.mark.parametrize(
+    "ancestor", ["unique_id=999", "unique_id=sentinel", "key=SENTINEL", "key_bucket=999"]
+)
+def test_partitioned_index_ignores_ancestor_names(
+    duck_con, monkeypatch, tmp_path, ancestor
+):
+    parent = tmp_path / ancestor
+    parent.mkdir()
+    temporary_directory = cs.TemporaryDirectory
+    monkeypatch.setattr(
+        cs, "TemporaryDirectory", lambda **kw: temporary_directory(dir=parent, **kw)
+    )
+    source = duck_con.sql(
+        "SELECT 1::BIGINT unique_id, ['ONE', 'ROAD'] clean_full_address_tokens"
+    )
+    index = cs.derive_inverted_index(source, duck_con, num_of_chunks=3)
+    assert index.fetchall() == [("ONE ROAD", [1], "bigram")]
+    assert list(parent.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    "field, count", [("unique_id", 2), ("key", 2), ("key", 22), ("default", 22)]
+)
+def test_partitioned_index_preserves_collations(duck_con, monkeypatch, field, count):
+    if field == "default":
+        duck_con.execute("SET default_collation = 'nocase'")
+    identifier = (
+        "CASE WHEN i = 0 THEN 'Aa' ELSE 'aa' END COLLATE NOCASE"
+        if field == "unique_id"
+        else "i + 1"
+    )
+    token = (
+        "'ONE'"
+        if field == "unique_id"
+        else "CASE WHEN i % 2 = 0 THEN 'a' ELSE 'A' END COLLATE NOCASE"
+    )
+    source = duck_con.sql(
+        f"SELECT {identifier} unique_id, "
+        f"[{token}, 'EXAMPLE', 'ROAD'] clean_full_address_tokens "
+        f"FROM range({count}) t(i)"
+    )
+    native = cs.derive_inverted_index(source, duck_con, num_of_chunks=1)
+    materialisations = []
+    original = cs._materialise_relation
+
+    def record(con, relation, name):
+        materialisations.append(name)
+        return original(con, relation, name)
+
+    monkeypatch.setattr(cs, "_materialise_relation", record)
+    candidate = cs.derive_inverted_index(source, duck_con, num_of_chunks=3)
+
+    def rows(index):
+        return sorted(
+            (key.lower(), sorted(str(i).lower() for i in ids), strategy)
+            for key, ids, strategy in index.fetchall()
+        )
+
+    assert rows(candidate) == rows(native)
+    assert any(name.startswith("__ukam_index_keys_") for name in materialisations)
