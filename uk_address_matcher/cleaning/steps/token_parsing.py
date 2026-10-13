@@ -11,8 +11,8 @@ from uk_address_matcher.sql_pipeline.steps import CTEStep, pipeline_stage
 def _address_for_parsing(address_expression: str) -> str:
     exclusion_pattern = r"'(^|[ (])EXCLUDING +([^ )]+)', '\1EXCLUDING_\2', 'g'"
     return f"regexp_replace({address_expression}, {exclusion_pattern})"
-  
- 
+
+
 @pipeline_stage(name="derive_local_key_tokens")
 def _derive_local_key_tokens(*, numericless_only: bool = True):
     """Extract lexical keys without changing original token positions."""
