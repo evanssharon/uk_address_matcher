@@ -165,8 +165,8 @@ def test_prepared_local_keys_span_cleaning_and_output_chunks(con, tmp_path):
     assert (meadow["df_uprns"], meadow["n_uprns"]) == (2, 4)
     manifest = json.loads((tmp_path / "ukam_manifest.json").read_text())
     assert "derive_local_keys" not in manifest["preparation_options"]
-    
-    
+
+
 def test_preparation_releases_consumed_source_chunks(con, tmp_path, monkeypatch):
     original = chunking_strategies._clean_data_using_precomputed_rel_tok_freq
     remaining = []
