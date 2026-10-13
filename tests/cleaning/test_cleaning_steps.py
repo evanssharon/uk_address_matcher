@@ -600,6 +600,7 @@ def test_parse_out_flat_positional():
             "B",
             "2",
         ),
+        ("SNOWDON HALL FLAT 4", None, None, "4"),
         (
             "15B LONDON ROAD",
             None,
@@ -618,8 +619,9 @@ def test_parse_out_flat_positional():
             "A",
             None,
         ),
-        # Only one number - indicates that it's a house number, not flat number
+        # Floor-first single numbers remain ambiguous.
         ("UPPER FLOOR FLAT 120 TEST", "UPPER FLOOR", None, None),
+        ("GROUND FLAT 4 HIGH STREET", None, None, None),
         # LOWER GROUND variants (canonicalised to GROUND FLOOR)
         ("FLAT LOWER GROUND 35 ATOP THE HILL LONDON", "GROUND FLOOR", None, None),
         ("LOWER GROUND FLAT 35 ATOP THE HILL LONDON", "GROUND FLOOR", None, None),
@@ -714,6 +716,20 @@ def test_parse_out_flat_positional():
             f"Address '{address}' expected has_flat_indicator '{expected_indicator}' "
             f"but got '{row[indicator_idx]}'"
         )
+
+    comma_separated_flat_relation = connection.sql(
+        "SELECT "
+        + _sql_literal("FLAT 6 HIGH STREET")
+        + " AS clean_full_address, "
+        + _sql_literal("FLAT, 6 HIGH STREET")
+        + " AS original_address_concat"
+    )
+    comma_separated_flat_row = _run_single_stage(
+        _parse_out_flat_position_and_letter,
+        comma_separated_flat_relation,
+        connection,
+    ).fetchone()
+    assert comma_separated_flat_row[number_idx] is None
 
 
 def test_parse_out_sub_premise_location():

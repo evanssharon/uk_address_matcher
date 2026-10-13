@@ -389,6 +389,9 @@ def _parse_out_flat_position_and_letter():
         + multi_floor_pattern
         + r")\b"
     )
+    floor_first_address_pattern = (
+        r"^\s*(?:" + floor_positions + "|" + "|".join(floor_with_suffix) + r")\s+FLAT\b"
+    )
     leading_bare_floor_position = (
         r"^\s*(GROUND|FIRST|SECOND|THIRD|FOURTH|FIFTH|SIXTH|"
         r"SEVENTH|EIGHTH|NINTH|TENTH|TOP)\s+\d"
@@ -402,7 +405,7 @@ def _parse_out_flat_position_and_letter():
     count_numbers = r"\b(\d{1,5})\b"
 
     flat_num_after_flat = (
-        r"\bFLAT\s+(\d{1,4})(?:\s|[A-Za-z/])"  # FLAT 12 / FLAT 12A / FLAT 12/2
+        r"\bFLAT\s+(\d{1,4})(?:\s|[A-Za-z/]|$)"  # FLAT 12 / FLAT 12A / FLAT 12/2
     )
     flat_letter_after_num_after_flat = (
         r"\bFLAT\s+\d{1,4}\s*([A-Za-z])\b"  # FLAT 12A / FLAT 12 A
@@ -412,6 +415,7 @@ def _parse_out_flat_position_and_letter():
 
     # Scottish style "FLAT 3/2" → use the right-hand number as the unit/flat number
     scottish_flat = r"\bFLAT\s+(\d+)\s*/\s*(\d+)\b"
+    flat_number_delimiter_pattern = r"\bFLAT\s*[,;]\s*\d"
 
     final_base_sql = f"""
     SELECT
@@ -521,6 +525,25 @@ def _parse_out_flat_position_and_letter():
                         regexp_extract(i.original_address_concat, '{scottish_flat}', 1),
                         ''
                     ) IS NOT NULL
+                     OR (
+                         COALESCE(
+                             length(
+                                 regexp_extract_all(
+                                     i.clean_full_address,
+                                     '{count_numbers}'
+                                 )
+                             ),
+                             0
+                         ) = 1
+                         AND NOT regexp_matches(
+                             i.clean_full_address,
+                             '{floor_first_address_pattern}'
+                         )
+                         AND NOT regexp_matches(
+                             upper(coalesce(i.original_address_concat, '')),
+                             '{flat_number_delimiter_pattern}'
+                         )
+                     )
                  )
             THEN COALESCE(
                 -- FLAT 3/2 → 2 (Scottish style)
