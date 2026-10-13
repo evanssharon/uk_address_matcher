@@ -13,6 +13,10 @@ from uuid import uuid4
 
 from uk_address_matcher._typing import PrepareCanonicalInput
 from uk_address_matcher.cleaning.local_keys import prepare_canonical_local_keys
+from uk_address_matcher.cleaning.materialisation import (
+    _CanonicalIntermediates,
+    _input_has_collation,
+)
 from uk_address_matcher.cleaning.rehydration.token_views import (
     _distinguishing_lexical_tokens_expression,
     _distinguishing_token_parts_view_expressions,
@@ -292,7 +296,8 @@ def _rehydrate_canonical_addresses(
         addresses = addresses.select("*, CAST(NULL AS VARCHAR) AS sub_premise_location")
         columns = addresses.columns
     numeric_token_views = [
-        f"list_extract(numeric_tokens, {position}) AS numeric_token_{position}"
+        "list_extract(regexp_extract_all(array_to_string(numeric_tokens, ' '), "
+        f"'\\d+'), {position}) AS numeric_token_{position}"
         for position in (2, 3)
         if f"numeric_token_{position}" not in columns
     ]
@@ -585,6 +590,38 @@ def prepare_canonical_folder(
         FileExistsError: If the output folder already contains prepared files
             and `overwrite` is `False`.
     """
+    with _CanonicalIntermediates(con) as storage:
+        _prepare_canonical_folder(
+            data,
+            output_folder,
+            con=con,
+            num_of_chunks=num_of_chunks,
+            output_chunk_count=output_chunk_count,
+            derive_distinguishing_wrt_adjacent_records=(
+                derive_distinguishing_wrt_adjacent_records
+            ),
+            overwrite=overwrite,
+            add_debug_features=add_debug_features,
+            show_progress=show_progress,
+            _derive_road_catalogue=_derive_road_catalogue,
+            _storage=storage,
+        )
+
+
+def _prepare_canonical_folder(
+    data: PrepareCanonicalInput,
+    output_folder: str | Path,
+    *,
+    con: duckdb.DuckDBPyConnection,
+    num_of_chunks: int,
+    output_chunk_count: int,
+    derive_distinguishing_wrt_adjacent_records: bool,
+    overwrite: bool,
+    add_debug_features: bool,
+    show_progress: ShowProgress,
+    _derive_road_catalogue: bool,
+    _storage: _CanonicalIntermediates | None,
+) -> None:
     from uk_address_matcher.cleaning.chunking_strategies import (
         _add_canonical_road_blocking_keys,
         _derive_term_frequencies_from_precleaned,
@@ -599,6 +636,8 @@ def prepare_canonical_folder(
     output_folder_path = None if output_is_remote else Path(output_folder)
     progress_mode = resolve_progress_mode(show_progress)
     data = _coerce_prepare_input_to_relation(data, con=con)
+    if _input_has_collation(con, data):
+        _storage = None
 
     logger.info("Preparing canonical data from '%s'", _describe_prepare_input(data))
     logger.info("Writing prepared canonical artefacts to '%s'", output_folder)
@@ -637,11 +676,25 @@ def prepare_canonical_folder(
 
     # Derive artefacts / cleaned canonical data for export
     logger.debug("Cleaning canonical addresses before term-frequency derivation")
+    owned_chunks: dict[str, int] = {}
+    preclean_drop_columns = (
+        (
+            "original_address_concat",
+            "numeric_role_keys",
+            "numeric_broad_roles",
+            "address_tokens",
+        )
+        if not add_debug_features
+        else ()
+    )
     precleaned = clean_data_pre_term_frequencies(
         data,
         con=con,
         num_of_chunks=num_of_chunks,
+        _drop_columns=preclean_drop_columns,
+        _owned_chunks=owned_chunks,
         show_progress=progress_mode,
+        _storage=_storage,
     )
     logger.debug("Deriving term frequencies from pre-cleaned canonical data")
     tf_table = _derive_term_frequencies_from_precleaned(precleaned, con)
@@ -657,7 +710,10 @@ def prepare_canonical_folder(
         ),
         dataset_role="canonical",
         _precleaned_addresses=True,
+        _drop_columns=canonical_drop_columns,
+        _owned_chunks=owned_chunks,
         show_progress=progress_mode,
+        _storage=_storage,
     )
     pre_artefact_drop_columns = tuple(
         column for column in canonical_drop_columns if column in df_clean.columns
@@ -670,6 +726,7 @@ def prepare_canonical_folder(
         con=con,
         num_of_chunks=num_of_chunks,
         show_progress=progress_mode,
+        _storage=_storage,
     )
 
     if _derive_road_catalogue:
@@ -678,12 +735,16 @@ def prepare_canonical_folder(
             df_clean,
             con,
             show_progress=progress_mode,
+            _storage=_storage,
         )
         df_clean = _add_canonical_road_blocking_keys(
             df_clean,
             con,
             num_of_chunks=num_of_chunks,
             roadlike_places=roadlike_places,
+            # Precleaning assigned and stored one unique ID per canonical row.
+            _stored_unique_address_ids=True,
+            _storage=_storage,
         )
         logger.debug("Canonical road blocking keys derived")
     else:
