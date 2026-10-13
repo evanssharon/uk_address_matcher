@@ -11,6 +11,74 @@ from uk_address_matcher.sql_pipeline.steps import CTEStep, pipeline_stage
 def _address_for_parsing(address_expression: str) -> str:
     exclusion_pattern = r"'(^|[ (])EXCLUDING +([^ )]+)', '\1EXCLUDING_\2', 'g'"
     return f"regexp_replace({address_expression}, {exclusion_pattern})"
+  
+ 
+@pipeline_stage(name="derive_local_key_tokens")
+def _derive_local_key_tokens(*, numericless_only: bool = True):
+    """Extract lexical keys without changing original token positions."""
+    eligible = "clean_full_address IS NOT NULL"
+    token_hash = "hash(clean_full_address)"
+    if numericless_only:
+        eligible += " AND len(numeric_tokens) = 0"
+        token_hash = "hash(clean_full_address, len(numeric_tokens))"
+    lexical = (
+        "length(__local_tokens[position]) >= 2 "
+        "AND NOT regexp_matches(__local_tokens[position], '[0-9]')"
+    )
+    next_lexical = lexical.replace("[position]", "[position + 1]")
+    return [
+        CTEStep(
+            "local_tokens",
+            """
+            SELECT input.*,
+                coalesce(string_split(clean_full_address, ' '), []::VARCHAR[])
+                    AS __local_tokens
+            FROM {input} input
+            """,
+        ),
+        CTEStep(
+            "final",
+            f"""
+            SELECT * EXCLUDE (__local_tokens),
+                CASE WHEN {eligible} THEN list_concat(
+                    list_transform(
+                        list_filter(range(1, len(__local_tokens) + 1), position ->
+                            {lexical}
+                            AND __local_tokens[position] NOT IN (
+                                'THE','OF','TO','AT','NEAR','VIA','FROM','AND','WITH'
+                            )
+                        ),
+                        position -> struct_pack(
+                            pos := position::INTEGER, kind := 'word',
+                            key := __local_tokens[position]
+                        )
+                    ),
+                    list_transform(
+                        list_filter(range(1, len(__local_tokens)), position ->
+                            {lexical} AND {next_lexical}
+                            AND (__local_tokens[position] NOT IN (
+                                    'THE','OF','TO','AT','NEAR','VIA','FROM','AND','WITH'
+                                )
+                                OR __local_tokens[position + 1]
+                                    NOT IN (
+                                        'THE','OF','TO','AT','NEAR','VIA','FROM','AND','WITH'
+                                    ))
+                        ),
+                        position -> struct_pack(
+                            pos := position::INTEGER, kind := 'phrase',
+                            key := __local_tokens[position] || ' '
+                                || __local_tokens[position + 1]
+                        )
+                    )
+                ) ELSE []::STRUCT(pos INTEGER, kind VARCHAR, key VARCHAR)[] END
+                    AS local_key_tokens,
+                {token_hash} AS local_key_token_hash,
+                2 AS local_key_token_version,
+                {str(numericless_only).lower()} AS local_key_numericless_only
+            FROM {{local_tokens}}
+            """,
+        ),
+    ]
 
 
 _DISTINGUISHING_MARKER_VALUES = (
@@ -326,6 +394,9 @@ def _parse_out_flat_position_and_letter():
         + multi_floor_pattern
         + r")\b"
     )
+    floor_first_address_pattern = (
+        r"^\s*(?:" + floor_positions + "|" + "|".join(floor_with_suffix) + r")\s+FLAT\b"
+    )
     leading_bare_floor_position = (
         r"^\s*(GROUND|FIRST|SECOND|THIRD|FOURTH|FIFTH|SIXTH|"
         r"SEVENTH|EIGHTH|NINTH|TENTH|TOP)\s+\d"
@@ -339,7 +410,7 @@ def _parse_out_flat_position_and_letter():
     count_numbers = r"\b(\d{1,5})\b"
 
     flat_num_after_flat = (
-        r"\bFLAT\s+(\d{1,4})(?:\s|[A-Za-z/])"  # FLAT 12 / FLAT 12A / FLAT 12/2
+        r"\bFLAT\s+(\d{1,4})(?:\s|[A-Za-z/]|$)"  # FLAT 12 / FLAT 12A / FLAT 12/2
     )
     flat_letter_after_num_after_flat = (
         r"\bFLAT\s+\d{1,4}\s*([A-Za-z])\b"  # FLAT 12A / FLAT 12 A
@@ -350,6 +421,7 @@ def _parse_out_flat_position_and_letter():
     # Scottish style "FLAT 3/2" → use the right-hand number as the unit/flat number
     scottish_flat = r"\bFLAT\s+(\d+)\s*/\s*(\d+)\b"
     address_for_parsing = _address_for_parsing("input.clean_full_address")
+    flat_number_delimiter_pattern = r"\bFLAT\s*[,;]\s*\d"
 
     final_base_sql = f"""
     SELECT
@@ -460,6 +532,25 @@ def _parse_out_flat_position_and_letter():
                         regexp_extract(i.original_address_concat, '{scottish_flat}', 1),
                         ''
                     ) IS NOT NULL
+                     OR (
+                         COALESCE(
+                             length(
+                                 regexp_extract_all(
+                                     i.clean_full_address,
+                                     '{count_numbers}'
+                                 )
+                             ),
+                             0
+                         ) = 1
+                         AND NOT regexp_matches(
+                             i.clean_full_address,
+                             '{floor_first_address_pattern}'
+                         )
+                         AND NOT regexp_matches(
+                             upper(coalesce(i.original_address_concat, '')),
+                             '{flat_number_delimiter_pattern}'
+                         )
+                     )
                  )
             THEN COALESCE(
                 -- FLAT 3/2 → 2 (Scottish style)
