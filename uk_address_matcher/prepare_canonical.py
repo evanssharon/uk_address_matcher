@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from uk_address_matcher._typing import PrepareCanonicalInput
+from uk_address_matcher.cleaning.local_keys import prepare_canonical_local_keys
 from uk_address_matcher.cleaning.materialisation import (
     _CanonicalIntermediates,
     _input_has_collation,
@@ -543,7 +544,8 @@ def prepare_canonical_folder(
     """Prepare canonical data and persist to a folder for later use.
 
     Performs address cleaning and tokenisation, term frequency computation,
-    and inverted index generation. Writes two Parquet files, canonical
+    postcode-distinguishing name statistics, and inverted index generation.
+    Writes two Parquet files, canonical
     addresses (single-file or chunked), and a manifest
     to `output_folder`:
 
@@ -748,6 +750,7 @@ def _prepare_canonical_folder(
     else:
         roadlike_places = None
 
+    df_clean = prepare_canonical_local_keys(con, df_clean)
     canonical_output_relation = df_clean
     canonical_storage_relation = _canonical_storage_relation(canonical_output_relation)
     canonical_storage_columns = [
