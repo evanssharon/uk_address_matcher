@@ -24,6 +24,9 @@ on:
       - "uv.lock"
       - ".github/workflows/labelling.yml"
 
+permissions:
+  contents: read
+
 concurrency:
   group: test-labelling-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
@@ -34,6 +37,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
 
       - name: Set up Node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
@@ -59,7 +64,7 @@ jobs:
           cache-dependency-glob: "uv.lock"
 
       - name: Install dependencies
-        run: uv sync --all-extras --dev
+        run: uv sync --all-extras --dev --locked
 
       - name: Install Chromium
         run: uv run playwright install --with-deps chromium
