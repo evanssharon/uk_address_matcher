@@ -2,7 +2,7 @@
 name = "uk_address_matcher"
 version = "1.5.0"
 description = "A package for matching UK addresses using a pretrained Splink model"
-authors = [{name = "Robin Linacre", email = "robinlinacre@hotmail.com"}]
+authors = [{name = "Robin Linacre", email = "robinlinacre@hotmail.com"}, {name = "Thomas Hepworth"}]
 readme = "readme.md"
 license = { text = "MIT" }
 requires-python = ">=3.10"
@@ -13,7 +13,7 @@ dependencies = [
 ]
 
 [project.urls]
-Repository = "https://github.com/robinL/uk_address_matcher"
+Repository = "https://github.com/moj-analytical-services/uk_address_matcher"
 
 [project.scripts]
 ukam-labelling = "uk_address_matcher.labelling.generator:main"
