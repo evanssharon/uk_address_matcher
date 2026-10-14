@@ -1,6 +1,7 @@
 name: Test labelling app
 
 on:
+  workflow_call:
   pull_request:
     paths:
       - "uk_address_matcher/labelling/**"
@@ -24,7 +25,7 @@ on:
       - ".github/workflows/labelling.yml"
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: test-labelling-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:

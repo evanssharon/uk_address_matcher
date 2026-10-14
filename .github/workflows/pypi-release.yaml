@@ -13,11 +13,24 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  run-pytest:
+    name: Run pytest matrix checks
+    uses: ./.github/workflows/run_pytest.yml
+
+  test-build-package:
+    name: Test build package
+    uses: ./.github/workflows/test-build-package.yaml
+
+  test-labelling:
+    name: Test labelling app
+    uses: ./.github/workflows/labelling.yml
+
   publish:
+    needs: [run-pytest, test-build-package, test-labelling]
     runs-on: ubuntu-latest
 
-    # The `release` environment is configured in GitHub with a
-    # 60-minute deployment wait timer before this job can start.
+    # The `release` environment requires a 60-minute wait and approval
+    # from moj-analytical-services/data_linking in GitHub settings.
     environment:
       name: release
 
