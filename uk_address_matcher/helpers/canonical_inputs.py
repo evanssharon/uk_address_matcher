@@ -10,6 +10,9 @@ def normalise_and_validate_raw_canonical(
     if "address_concat" not in rel.columns and "original_address_concat" in rel.columns:
         rel = rel.project("*, original_address_concat AS address_concat")
 
+    if "unique_id" not in rel.columns and "input_id" in rel.columns:
+        rel = rel.project("*, input_id AS unique_id")
+
     required = {"unique_id", "address_concat"}
     missing = sorted(required.difference(rel.columns))
     if missing:
