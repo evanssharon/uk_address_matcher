@@ -16,7 +16,7 @@ For full documentation, see our [main documentation site](https://moj-analytical
 - **Simple.** Setup in seconds, runs on a laptop. No separate infrastructure of services needed.
 - **Fast.** Match 100,000 addresses in ~30 seconds.
 - **Proven accuracy.** We use public, labelled datasets to measure and document accuracy.
-- **\[OPTIONAL\] Support for Ordnance Survey data.** We provide an automated build pipeline for users wishing to match to Ordnance Survey data. Matching to any other canonical dataset is also supported.
+- **Support for Ordnance Survey data.** We offer first-party support and an automated data preparation pipeline through [`ukam_os_builder`](https://github.com/moj-analytical-services/ukam_os_builder). You can also match against any other canonical dataset.
 
 The end-to-end process of matching 100,000 addresses to Ordnance Survey data, including all software downloads and data processing takes:
 
