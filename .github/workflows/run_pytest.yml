@@ -1,6 +1,7 @@
 name: Run pytest
 
 on:
+  workflow_call:
   pull_request:
     paths:
       - "uk_address_matcher/**"
@@ -22,7 +23,7 @@ on:
       - "vite.config.js"
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: run-pytest-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
