@@ -295,7 +295,7 @@ def test_derive_roadlike_places_filters_before_district_batching(duck_con):
     ]
 
 
-def test_derive_roadlike_places_composes_district_and_classification_filters(duck_con):
+def test_derive_roadlike_places_scopes_districts_with_classified_rows(duck_con):
     source = duck_con.sql("""
         SELECT * FROM (VALUES
             ('1', '12 HIGH STREET', 'AB1 2CD', ['12'], 'RD01'),
@@ -315,11 +315,15 @@ def test_derive_roadlike_places_composes_district_and_classification_filters(duc
     )
 
     assert catalogue.select("postcode_district, candidate_phrase").order(
-        "postcode_district"
-    ).fetchall() == [("AB1", "HIGH STREET"), ("AB2", "HIGH STREET")]
+        "postcode_district, candidate_phrase"
+    ).fetchall() == [
+        ("AB1", "HIGH STREET"),
+        ("AB1", "MAIN ROAD"),
+        ("AB2", "HIGH STREET"),
+    ]
 
 
-def test_roadlike_catalogue_filters_non_residential_rows(duck_con):
+def test_roadlike_catalogue_includes_non_residential_rows(duck_con):
     source = duck_con.sql("""
         SELECT * FROM (VALUES
             ('1', '12 HIGH STREET', 'AB1 2CD', ['12'], 'RD01'),
@@ -330,7 +334,10 @@ def test_roadlike_catalogue_filters_non_residential_rows(duck_con):
     """)
 
     catalogue = _catalogue_from_source(duck_con, source)
-    assert catalogue.project("candidate_phrase").fetchall() == [("HIGH STREET",)]
+    assert catalogue.project("candidate_phrase").order("candidate_phrase").fetchall() == [
+        ("COMMERCIAL ROAD",),
+        ("HIGH STREET",),
+    ]
 
 
 def test_roadlike_catalogue_uses_all_rows_without_classificationcode(duck_con):

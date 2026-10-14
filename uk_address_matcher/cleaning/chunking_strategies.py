@@ -361,8 +361,7 @@ def derive_roadlike_places(
     The input must already be canonical-cleaned, including ``clean_full_address``
     and ``numeric_tokens``. Road preparation and candidate extraction run in
     batches of postcode districts; catalogue evidence is local to each district.
-    ``postcode_districts`` restricts the source before batching. When
-    ``classificationcode`` is available, only top-level ``R`` rows contribute.
+    ``postcode_districts`` restricts the source before batching.
     """
     selected_postcode_districts = _normalise_postcode_districts(postcode_districts)
     if postcode_districts_per_batch is not None and postcode_districts_per_batch < 1:
@@ -402,42 +401,13 @@ def derive_roadlike_places(
             len(selected_postcode_districts),
             scoped_row_count,
         )
-    road_catalogue_row_count: int | None = None
-    if "classificationcode" not in canonical_address_table.columns:
-        logger.warning(
-            "Residential road catalogue filter requested, but "
-            "classificationcode is unavailable; processing all canonical rows"
-        )
-    else:
-        filtered_source = con.sql(f"""
-            SELECT *
-            FROM ({road_catalogue_source.sql_query()}) AS canonical
-            WHERE substr(CAST(classificationcode AS VARCHAR), 1, 1) = 'R'
-        """)
-        filtered_row_count = filtered_source.count("*").fetchone()[0]
-        if filtered_row_count:
-            road_catalogue_source = filtered_source
-            road_catalogue_row_count = filtered_row_count
-            logger.info(
-                "Building residential road catalogue from %s canonical rows",
-                filtered_row_count,
-            )
-        else:
-            logger.warning(
-                "No residential canonical rows matched classificationcode; "
-                "processing all canonical rows"
-            )
 
     progress_mode = resolve_progress_mode(show_progress)
     uid = _uid()
     district_table = f"__ukam_roadlike_districts_{uid}"
     candidate_sources_table = f"__ukam_roadlike_candidate_sources_{uid}"
     catalogue_table = f"__ukam_roadlike_places_{uid}"
-    total_rows = (
-        road_catalogue_row_count
-        if road_catalogue_row_count is not None
-        else road_catalogue_source.count("*").fetchone()[0]
-    )
+    total_rows = road_catalogue_source.count("*").fetchone()[0]
     if total_rows == 0:
         raise ValueError(
             "Supplied address table has no records. Please provide a non-empty table."

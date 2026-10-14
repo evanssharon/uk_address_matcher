@@ -135,6 +135,59 @@ def test_prepare_creates_expected_files(prepared_folder):
     assert (prepared_folder / "ukam_manifest.json").exists()
 
 
+@pytest.mark.parametrize(
+    "optional_columns",
+    [
+        {},
+        {"classificationcode": "RD01"},
+        {"classification_code": "RD01"},
+        {"floorlevel": 0, "source_note": "example"},
+        {"classificationcode": "RD01", "floorlevel": 0, "source_note": "example"},
+        {"classification_code": "RD01", "floorlevel": 0, "source_note": "example"},
+    ],
+    ids=[
+        "minimal",
+        "classification",
+        "classification-underscore",
+        "metadata",
+        "classification-and-metadata",
+        "classification-underscore-and-metadata",
+    ],
+)
+def test_prepare_accepts_minimal_columns_and_optional_metadata(
+    con, tmp_path, optional_columns
+):
+    source = con.from_arrow(
+        pyarrow.Table.from_pylist(
+            [
+                {
+                    "input_id": record["unique_id"],
+                    "address_concat": record["address_concat"],
+                    "postcode": record["postcode"],
+                    **optional_columns,
+                }
+                for record in CANONICAL_RECORDS
+            ]
+        )
+    )
+
+    prepare_canonical_folder(source, tmp_path, con=con, show_progress="off")
+    prepared = load_prepared_canonical_data(tmp_path, con)
+
+    assert prepared.addresses.project("unique_id").order("unique_id").fetchall() == [
+        (record["unique_id"],) for record in CANONICAL_RECORDS
+    ]
+    assert prepared.addresses.filter(
+        "clean_full_address IS NULL OR clean_full_address = ''"
+    ).count("*").fetchone() == (0,)
+    assert prepared.roadlike_places is not None
+    assert prepared.roadlike_places.count("*").fetchone()[0] > 0
+    for column, value in optional_columns.items():
+        assert prepared.addresses.project(column).fetchall() == [(value,)] * len(
+            CANONICAL_RECORDS
+        )
+
+
 def test_prepared_local_keys_span_cleaning_and_output_chunks(con, tmp_path):
     canonical = con.sql("""
         SELECT * FROM (VALUES
@@ -322,14 +375,27 @@ def test_prepare_derives_road_catalogue_for_all_canonical_districts(con, tmp_pat
     assert "road_1_norm" in prepared.addresses.columns
 
 
-def test_prepare_filters_classified_road_catalogue_to_residential_rows(con, tmp_path):
-    source = con.sql("""
+@pytest.mark.parametrize(
+    ("classification_column", "include_conflicting_alias"),
+    [
+        ("classificationcode", False),
+        ("classification_code", False),
+        ("classificationcode", True),
+    ],
+    ids=["classificationcode", "classification_code", "both"],
+)
+def test_prepare_road_catalogue_includes_all_classified_rows(
+    con, tmp_path, classification_column, include_conflicting_alias
+):
+    source = con.sql(f"""
         SELECT * FROM (VALUES
             ('1', '12 HIGH STREET', 'AB1 2CD', 'RD01'),
             ('2', '14 COMMERCIAL ROAD', 'AB1 3CD', 'CI01')
-        ) AS rows(unique_id, address_concat, postcode, classificationcode)
+        ) AS rows(unique_id, address_concat, postcode, {classification_column})
     """)
-    output_folder = tmp_path / "residential_roadlike_places"
+    if include_conflicting_alias:
+        source = source.project("*, 'CI01' AS classification_code")
+    output_folder = tmp_path / "all_classified_roadlike_places"
 
     prepare_canonical_folder(
         source,
@@ -340,8 +406,11 @@ def test_prepare_filters_classified_road_catalogue_to_residential_rows(con, tmp_
 
     prepared = load_prepared_canonical_data(output_folder, con)
     assert prepared.roadlike_places is not None
-    assert prepared.roadlike_places.project("candidate_phrase").fetchall() == [
-        ("HIGH STREET",)
+    assert prepared.roadlike_places.project("candidate_phrase").order(
+        "candidate_phrase"
+    ).fetchall() == [
+        ("COMMERCIAL ROAD",),
+        ("HIGH STREET",),
     ]
 
 
