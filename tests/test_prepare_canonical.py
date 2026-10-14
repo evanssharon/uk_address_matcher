@@ -155,7 +155,7 @@ def test_prepare_creates_expected_files(prepared_folder):
     ],
 )
 def test_prepare_accepts_minimal_columns_and_optional_metadata(
-    con, tmp_path, caplog, optional_columns
+    con, tmp_path, optional_columns
 ):
     source = con.from_arrow(
         pyarrow.Table.from_pylist(
@@ -170,7 +170,6 @@ def test_prepare_accepts_minimal_columns_and_optional_metadata(
             ]
         )
     )
-    caplog.set_level(logging.WARNING, logger="uk_address_matcher")
 
     prepare_canonical_folder(source, tmp_path, con=con, show_progress="off")
     prepared = load_prepared_canonical_data(tmp_path, con)
@@ -187,7 +186,6 @@ def test_prepare_accepts_minimal_columns_and_optional_metadata(
         assert prepared.addresses.project(column).fetchall() == [(value,)] * len(
             CANONICAL_RECORDS
         )
-    assert "classificationcode is unavailable" not in caplog.text
 
 
 def test_prepared_local_keys_span_cleaning_and_output_chunks(con, tmp_path):
@@ -386,7 +384,7 @@ def test_prepare_derives_road_catalogue_for_all_canonical_districts(con, tmp_pat
     ],
     ids=["classificationcode", "classification_code", "both"],
 )
-def test_prepare_filters_classified_road_catalogue_to_residential_rows(
+def test_prepare_road_catalogue_includes_all_classified_rows(
     con, tmp_path, classification_column, include_conflicting_alias
 ):
     source = con.sql(f"""
@@ -397,7 +395,7 @@ def test_prepare_filters_classified_road_catalogue_to_residential_rows(
     """)
     if include_conflicting_alias:
         source = source.project("*, 'CI01' AS classification_code")
-    output_folder = tmp_path / "residential_roadlike_places"
+    output_folder = tmp_path / "all_classified_roadlike_places"
 
     prepare_canonical_folder(
         source,
@@ -408,8 +406,11 @@ def test_prepare_filters_classified_road_catalogue_to_residential_rows(
 
     prepared = load_prepared_canonical_data(output_folder, con)
     assert prepared.roadlike_places is not None
-    assert prepared.roadlike_places.project("candidate_phrase").fetchall() == [
-        ("HIGH STREET",)
+    assert prepared.roadlike_places.project("candidate_phrase").order(
+        "candidate_phrase"
+    ).fetchall() == [
+        ("COMMERCIAL ROAD",),
+        ("HIGH STREET",),
     ]
 
 
