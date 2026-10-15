@@ -1,8 +1,9 @@
 name: Run address matcher with external labels
 
 on:
-  pull_request:
-    branches: [ main ]
+  workflow_dispatch:
+  push:
+    branches: [main]
     paths:
       - 'uk_address_matcher/**'
       - '.github/workflows/**'
@@ -11,15 +12,20 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   run-address-matcher:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    environment: private-labels
 
     steps:
     - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      with:
+        ref: main
+        persist-credentials: false
 
     - name: Set up Python
       uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
@@ -34,14 +40,15 @@ jobs:
         cache-dependency-glob: "uv.lock"
 
     - name: Install the project
-      run: uv sync --all-extras --dev
+      run: uv sync --all-extras --dev --locked
 
     - name: Clone address_matching_labels repo
-      env:
-        LABELS_PAT: ${{ secrets.LABELS_PAT }}
-      run: |
-        git clone https://RobinL:${LABELS_PAT}@github.com/RobinL/address_matching_labels.git
-
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      with:
+        repository: RobinL/address_matching_labels
+        token: ${{ secrets.LABELS_PAT }}
+        path: address_matching_labels
+        persist-credentials: false
 
     - name: Run labels accuracy script and capture output
       run: uv run .github/workflows/run_labels_accuracy_test.py

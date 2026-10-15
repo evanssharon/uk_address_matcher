@@ -9,8 +9,6 @@ on:
 
 permissions:
   contents: read
-  pull-requests: write
-  issues: write # PR comments are issue comments under the hood; this avoids permission surprises
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -22,6 +20,8 @@ jobs:
 
     steps:
     - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      with:
+        persist-credentials: false
 
     - name: Set up Python
       uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
@@ -36,7 +36,7 @@ jobs:
         cache-dependency-glob: "uv.lock"
 
     - name: Install the project
-      run: uv sync --all-extras --dev
+      run: uv sync --all-extras --dev --locked
 
     - name: Run address matcher test
       id: run-test
@@ -65,11 +65,14 @@ jobs:
         echo "Preview (first 40 lines):"
         sed -n '1,40p' github-comment.md
 
-    - name: Comment on PR (sticky)
+    - name: Publish job summary
       if: always()
-      uses: marocchino/sticky-pull-request-comment@d4d6b0936434b21bc8345ad45a440c5f7d2c40ff # v3.0.3
+      run: cat github-comment.md >> "$GITHUB_STEP_SUMMARY"
+
+    - name: Upload comment data
+      if: always()
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
       with:
-        header: address-matcher-edge-cases
+        name: edge-cases-comment
         path: github-comment.md
-        hide_and_recreate: false
-        skip_unchanged: false
+        retention-days: 3
