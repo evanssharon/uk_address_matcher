@@ -107,6 +107,11 @@ Example output:
 
 ## Development
 
+Security checks and maintainer setup are documented in
+[developer security administration](security/README.md). Contributors should run the
+checks but leave security baselines and exceptions to maintainers. Report vulnerabilities
+privately using the [security policy](SECURITY.md).
+
 The scripts and tests will run better if you create .vscode/settings.json with the following:
 
 ```json
