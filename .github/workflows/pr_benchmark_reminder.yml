@@ -10,8 +10,6 @@ on:
 
 permissions:
   contents: read
-  pull-requests: write
-  issues: write
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -20,6 +18,7 @@ concurrency:
 jobs:
   benchmark-reminder:
     runs-on: ubuntu-latest
+    permissions: {contents: read, pull-requests: write}
 
     steps:
       - name: Write sticky PR reminder

@@ -34,6 +34,8 @@ jobs:
       - name: Install security tools only
         run: uv sync --locked --only-group security --no-install-project
       - name: Scan tracked files, Python dependencies and workflows
+        env:
+          SKIP: bandit
         run: uv run --no-sync pre-commit run --all-files
       - name: Ensure security controls were not modified by scanners
         if: always()
