@@ -1,5 +1,6 @@
 rules:
   dangerous-triggers:
     ignore:
+      - security-policy.yml
       - edge_cases_publish_comment.yml
       - pr_benchmark_reminder.yml
