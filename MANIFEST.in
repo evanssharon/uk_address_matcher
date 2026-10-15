@@ -1,7 +1,6 @@
 prune security
 prune .github
 exclude .pre-commit-config.yaml
-exclude scripts/check_secrets.py
-exclude scripts/check_security_policy.py
-exclude scripts/audit_dependencies.py
+exclude dev_scripts/check_secrets.py
+exclude dev_scripts/audit_dependencies.py
 exclude tests/test_security_checks.py

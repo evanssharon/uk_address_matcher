@@ -3,7 +3,7 @@ applyTo:
   - "benchmarking/**/*.py"
   - "benchmarking/**/*.md"
   - "benchmarking/**/*.json"
-  - "scripts/reduced_canonical.py"
+  - "dev_scripts/reduced_canonical.py"
   - "uk_address_matcher/post_linkage/match_result/**/*.py"
   - "uk_address_matcher/data/splink_model.json"
   - "tests/test_benchmark_run_persistence.py"
@@ -21,13 +21,13 @@ applyTo:
 ## Primary control surfaces
 
 - Treat `benchmarking/run_benchmarking.py` as the normal experiment entrypoint.
-- Treat `scripts/reduced_canonical.py` as the normal fast rebuild path for the reduced canonical dataset.
+- Treat `dev_scripts/reduced_canonical.py` as the normal fast rebuild path for the reduced canonical dataset.
 - Prefer persisted run artefacts under `benchmarking/results/<dataset>/<date>/<run_id>/` over transient console summaries.
 
 ## Reduced canonical rebuild workflow
 
 - If an experiment changes upstream cleaned features or canonical-side fields used by matching, rebuild the reduced canonical before benchmarking.
-- Prefer `uv run python scripts/reduced_canonical.py` rather than inventing a bespoke rebuild script.
+- Prefer `uv run python dev_scripts/reduced_canonical.py` rather than inventing a bespoke rebuild script.
 - Keep the reduced canonical output path stable unless the user explicitly asks for a different location.
 - Report:
   - source canonical path,
