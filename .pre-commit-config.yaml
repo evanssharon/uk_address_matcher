@@ -3,7 +3,7 @@ repos:
     hooks:
       - id: detect-secrets
         name: Scan secrets without modifying maintained baselines
-        entry: uv run --no-sync python -I scripts/check_secrets.py
+        entry: uv run --no-sync python -I dev_scripts/check_secrets.py
         language: system
         exclude: ^security/secrets\.baseline$
         types: [text]
@@ -11,11 +11,11 @@ repos:
         name: Scan executable Python code with Bandit
         entry: uv run --no-sync bandit -q --severity-level medium --confidence-level medium --baseline security/bandit.baseline
         language: system
-        files: ^(uk_address_matcher|scripts|benchmarking|\.github/workflows)/
+        files: ^(uk_address_matcher|benchmarking|tests)/
         types: [python]
       - id: pip-audit
         name: Audit locked Python dependencies
-        entry: uv run --no-sync python -I scripts/audit_dependencies.py
+        entry: uv run --no-sync python -I dev_scripts/audit_dependencies.py
         language: system
         files: ^(pyproject\.toml|uv\.lock)$
         pass_filenames: false
