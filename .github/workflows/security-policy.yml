@@ -29,4 +29,4 @@ jobs:
       - name: Enforce policy using trusted standard-library code
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python -I scripts/check_security_policy.py
+        run: python -I security/check_security_policy.py
