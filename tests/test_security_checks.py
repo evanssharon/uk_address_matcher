@@ -221,6 +221,18 @@ def test_bandit_scans_only_core_python_directories(filename: str, expected: bool
     assert hook["types"] == ["python"]
 
 
+def test_ci_temporarily_skips_only_bandit() -> None:
+    workflow_path = Path(__file__).parents[1] / ".github" / "workflows" / "security.yml"
+    workflow = yaml.load(
+        workflow_path.read_text(encoding="utf-8"), Loader=yaml.BaseLoader
+    )
+    steps = workflow["jobs"]["security"]["steps"]
+    scan = next(
+        step for step in steps if "pre-commit run --all-files" in step.get("run", "")
+    )
+    assert scan["env"] == {"SKIP": "bandit"}
+
+
 def test_trusted_policy_workflow_never_checks_out_pr_head() -> None:
     workflow_path = (
         Path(__file__).parents[1] / ".github" / "workflows" / "security-policy.yml"
