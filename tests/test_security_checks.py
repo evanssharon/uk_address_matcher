@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import secrets
 import subprocess
 from pathlib import Path
@@ -8,9 +9,9 @@ from pathlib import Path
 import pytest
 import yaml
 
-from scripts import check_security_policy
-from scripts.check_secrets import main
-from scripts.check_security_policy import is_security_maintainer, protected_changes
+from dev_scripts.check_secrets import main
+from security import check_security_policy
+from security.check_security_policy import is_security_maintainer, protected_changes
 
 
 @pytest.mark.parametrize("returncode", [0, 1, 3])
@@ -33,7 +34,7 @@ def test_secrets_check_does_not_modify_maintained_baseline(
         temporary_baseline.write_text("updated metadata", encoding="utf-8")
         return subprocess.CompletedProcess(command, returncode, stdout="", stderr="")
 
-    monkeypatch.setattr("scripts.check_secrets.subprocess.run", run_hook)
+    monkeypatch.setattr("dev_scripts.check_secrets.subprocess.run", run_hook)
 
     assert main(["--baseline", str(baseline), "example.py"]) == (
         0 if returncode == 3 else returncode
@@ -55,8 +56,8 @@ def test_secrets_check_requires_maintained_baseline(tmp_path: Path) -> None:
         "security/nested/exception.json",
         ".github/workflows/security.yml",
         ".github/CODEOWNERS",
-        "scripts/check_security_policy.py",
-        "scripts/check_secrets.py",
+        "security/check_security_policy.py",
+        "dev_scripts/check_secrets.py",
         "pyproject.toml",
         "uv.lock",
     ],
@@ -199,6 +200,27 @@ def test_policy_fails_closed_on_incomplete_or_oversized_diffs(
         check_security_policy.main()
 
 
+@pytest.mark.parametrize(
+    ("filename", "expected"),
+    [
+        ("uk_address_matcher/cleaning/example.py", True),
+        ("benchmarking/runner.py", True),
+        ("tests/test_security_checks.py", True),
+        ("dev_scripts/check_secrets.py", False),
+        ("security/check_security_policy.py", False),
+        (".github/workflows/run_labels_accuracy_test.py", False),
+        ("examples/example_matching.py", False),
+        ("uk_address_matcher_extra/example.py", False),
+    ],
+)
+def test_bandit_scans_only_core_python_directories(filename: str, expected: bool) -> None:
+    config_path = Path(__file__).parents[1] / ".pre-commit-config.yaml"
+    config = yaml.load(config_path.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
+    hook = next(hook for hook in config["repos"][0]["hooks"] if hook["id"] == "bandit")
+    assert bool(re.search(hook["files"], filename)) is expected
+    assert hook["types"] == ["python"]
+
+
 def test_trusted_policy_workflow_never_checks_out_pr_head() -> None:
     workflow_path = (
         Path(__file__).parents[1] / ".github" / "workflows" / "security-policy.yml"
@@ -211,7 +233,7 @@ def test_trusted_policy_workflow_never_checks_out_pr_head() -> None:
     steps = workflow["jobs"]["policy"]["steps"]
     assert steps[0]["with"]["ref"] == "${{ github.event.pull_request.base.sha }}"
     assert steps[0]["with"]["persist-credentials"] == "false"
-    assert steps[-1]["run"] == "python -I scripts/check_security_policy.py"
+    assert steps[-1]["run"] == "python -I security/check_security_policy.py"
 
 
 def test_private_labels_workflow_does_not_run_pr_code() -> None:
