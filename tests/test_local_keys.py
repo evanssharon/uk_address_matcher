@@ -760,9 +760,9 @@ def test_spacing_alias_cannot_displace_better_exact_anchored_alias(
         params={"anchors": anchors, "other_weight": other_weight},
     )
     source = predictions.select(
-        "DISTINCT ukam_address_id_r AS ukam_address_id, "
+        "ukam_address_id_r AS ukam_address_id, "
         "lk_level_by_alias_r AS lk_level_by_alias, lk_anchor_uprns_r AS lk_anchor_uprns"
-    )
+    ).distinct()
     predictions = predictions.select("* EXCLUDE (lk_level_by_alias_r, lk_anchor_uprns_r)")
     preserved = preserve_anchored_name_aliases(duck_con, predictions, source)
     assert preserved.columns == predictions.columns
@@ -820,9 +820,9 @@ def test_alias_preservation_uses_actual_spacing_contribution(
         params={"factor": factor, "spacing_weight": spacing_weight},
     )
     source = predictions.select(
-        "DISTINCT ukam_address_id_r AS ukam_address_id, "
+        "ukam_address_id_r AS ukam_address_id, "
         "lk_level_by_alias_r AS lk_level_by_alias, lk_anchor_uprns_r AS lk_anchor_uprns"
-    )
+    ).distinct()
     predictions = predictions.select("* EXCLUDE (lk_level_by_alias_r, lk_anchor_uprns_r)")
     preserved = preserve_anchored_name_aliases(duck_con, predictions, source)
     assert preserved.order("ukam_address_id_l").select(
@@ -861,9 +861,9 @@ def test_alias_preservation_includes_custom_tf_contribution(
         params={"factor": factor, "tf_factor": tf_factor},
     )
     source = predictions.select(
-        "DISTINCT ukam_address_id_r AS ukam_address_id, "
+        "ukam_address_id_r AS ukam_address_id, "
         "lk_level_by_alias_r AS lk_level_by_alias, lk_anchor_uprns_r AS lk_anchor_uprns"
-    )
+    ).distinct()
     predictions = predictions.select("* EXCLUDE (lk_level_by_alias_r, lk_anchor_uprns_r)")
     preserved = preserve_anchored_name_aliases(duck_con, predictions, source)
     assert preserved.columns == predictions.columns
