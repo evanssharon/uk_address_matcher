@@ -288,6 +288,8 @@ def _exact_matches(
         INNER JOIN {{canon_keys}} AS canon
             ON messy.postcode = canon.postcode
             AND messy.clean_full_address_no_ws = canon.clean_full_address_no_ws
+            AND regexp_extract_all(messy.clean_full_address, '[0-9]+')
+                = regexp_extract_all(canon.clean_full_address, '[0-9]+')
             AND messy.clean_full_address <> canon.clean_full_address
             AND messy.clean_full_address_no_ws <> ''
     """
@@ -387,6 +389,7 @@ def _exact_matches(
             SELECT
                 canon.postcode,
                 canon.clean_full_address_no_flat_no_ws,
+                regexp_extract_all(canon.clean_full_address, '[0-9]+') AS numeric_parts,
                 MIN(canon.canonical_ukam_address_id) AS canonical_ukam_address_id,
                 MIN(canon.canonical_unique_id) AS resolved_canonical_id,
                 MIN(canon.flat_number) AS flat_number,
@@ -409,7 +412,7 @@ def _exact_matches(
                 ) AS canonical_has_unit_evidence
             FROM {canon_flat_keys} AS canon
             WHERE canon.clean_full_address_no_flat_no_ws <> ''
-            GROUP BY canon.postcode, canon.clean_full_address_no_flat_no_ws
+            GROUP BY canon.postcode, canon.clean_full_address_no_flat_no_ws, numeric_parts
             HAVING COUNT(DISTINCT canon.canonical_ukam_address_id) = 1
         """
 
@@ -424,6 +427,8 @@ def _exact_matches(
                 ON messy.postcode = canon.postcode
                 AND messy.clean_full_address_no_flat_no_ws
                     = canon.clean_full_address_no_flat_no_ws
+                AND regexp_extract_all(messy.clean_full_address, '[0-9]+')
+                    = canon.numeric_parts
             WHERE messy.clean_full_address_no_flat_no_ws <> ''
             AND (
                 messy.clean_full_address_no_flat_no_ws
@@ -487,6 +492,8 @@ def _exact_matches(
                         messy.clean_full_address <> canon.clean_full_address
                         AND messy.clean_full_address_no_ws
                             = canon.clean_full_address_no_ws
+                        AND regexp_extract_all(messy.clean_full_address, '[0-9]+')
+                            = regexp_extract_all(canon.clean_full_address, '[0-9]+')
                         AND messy.clean_full_address_no_ws <> ''
                     )
                 )
