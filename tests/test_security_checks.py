@@ -125,6 +125,149 @@ def test_only_administrators_and_maintainers_can_change_controls(
     assert is_security_maintainer(permission) is expected
 
 
+@pytest.fixture
+def dependabot_action_pr() -> dict[str, object]:
+    return {
+        "user": {"login": "dependabot[bot]", "id": 49699333, "type": "Bot"},
+        "head": {
+            "ref": "dependabot/github_actions/actions/checkout-7.0.1",
+            "repo": {"full_name": "example/repository"},
+            "sha": "current",
+        },
+        "changed_files": 1,
+    }
+
+
+@pytest.fixture
+def action_pin_file() -> dict[str, object]:
+    return {
+        "filename": ".github/workflows/security-policy.yml",
+        "status": "modified",
+        "additions": 1,
+        "deletions": 1,
+        "patch": (
+            "@@ -1,3 +1,3 @@\n"
+            " steps:\n"
+            f"-  - uses: actions/checkout@{'a' * 40} # v6.0.2\n"
+            f"+  - uses: actions/checkout@{'b' * 40} # v7.0.1\n"
+            "     with:\n"
+        ),
+    }
+
+
+def test_policy_allows_only_dependabot_action_pins(
+    dependabot_action_pr: dict[str, object], action_pin_file: dict[str, object]
+) -> None:
+    assert check_security_policy.is_dependabot_action_update(
+        dependabot_action_pr, [action_pin_file], "example/repository"
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("filename", "security/check_security_policy.py"),
+        ("status", "added"),
+        ("previous_filename", ".github/workflows/other.yml"),
+        ("patch", None),
+        ("additions", 2),
+        ("deletions", 2),
+    ],
+)
+def test_dependabot_exception_rejects_other_or_incomplete_changes(
+    dependabot_action_pr: dict[str, object],
+    action_pin_file: dict[str, object],
+    field: str,
+    value: object,
+) -> None:
+    action_pin_file[field] = value
+    assert not check_security_policy.is_dependabot_action_update(
+        dependabot_action_pr, [action_pin_file], "example/repository"
+    )
+
+
+@pytest.mark.parametrize(
+    ("original", "replacement"),
+    [
+        ("+  - uses: actions/checkout@", "+  - uses: other/checkout@"),
+        ("+  - uses:", "+    - uses:"),
+        ("b" * 40, "v7.0.1"),
+        ("# v7.0.1", "# zizmor: ignore[dangerous-triggers]"),
+        ("+  - uses: actions/checkout@", "+  - run: echo "),
+        ("+  - uses: actions/checkout@", "+    permissions: "),
+        ("     with:", f"+  - uses: actions/checkout@{'c' * 40}"),
+    ],
+)
+def test_dependabot_exception_rejects_action_or_structure_changes(
+    dependabot_action_pr: dict[str, object],
+    action_pin_file: dict[str, object],
+    original: str,
+    replacement: str,
+) -> None:
+    action_pin_file["patch"] = str(action_pin_file["patch"]).replace(
+        original, replacement
+    )
+    assert not check_security_policy.is_dependabot_action_update(
+        dependabot_action_pr, [action_pin_file], "example/repository"
+    )
+
+
+@pytest.mark.parametrize(
+    "user",
+    [
+        {"login": "dependabot[bot]", "id": 123, "type": "Bot"},
+        {"login": "other[bot]", "id": 49699333, "type": "Bot"},
+        {"login": "dependabot[bot]", "id": 49699333, "type": "User"},
+    ],
+)
+def test_dependabot_exception_verifies_bot_identity(
+    dependabot_action_pr: dict[str, object],
+    action_pin_file: dict[str, object],
+    user: dict[str, object],
+) -> None:
+    dependabot_action_pr["user"] = user
+    assert not check_security_policy.is_dependabot_action_update(
+        dependabot_action_pr, [action_pin_file], "example/repository"
+    )
+
+
+def test_dependabot_exception_rejects_forks_and_mixed_changes(
+    dependabot_action_pr: dict[str, object], action_pin_file: dict[str, object]
+) -> None:
+    assert not check_security_policy.is_dependabot_action_update(
+        dependabot_action_pr, [action_pin_file], "other/repository"
+    )
+    assert not check_security_policy.is_dependabot_action_update(
+        dependabot_action_pr,
+        [action_pin_file, {"filename": "security/secrets.baseline"}],
+        "example/repository",
+    )
+
+
+def test_policy_accepts_dependabot_pin_updates_without_granting_a_role(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    dependabot_action_pr: dict[str, object],
+    action_pin_file: dict[str, object],
+) -> None:
+    event_file = tmp_path / "event.json"
+    event_file.write_text(
+        json.dumps({"pull_request": {"number": 12, "head": {"sha": "current"}}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("GITHUB_EVENT_PATH", str(event_file))
+    monkeypatch.setenv("GITHUB_REPOSITORY", "example/repository")
+
+    def request(path: str) -> object:
+        assert "/collaborators/" not in path
+        if "/files?" in path:
+            return [action_pin_file]
+        return dependabot_action_pr
+
+    monkeypatch.setattr(check_security_policy, "github_request", request)
+    assert check_security_policy.main() == 0
+
+
 def test_real_secret_hook_rejects_new_secret_without_updating_baseline(
     tmp_path: Path,
 ) -> None:

@@ -35,6 +35,74 @@ SUPPRESSION = re.compile(
     r"|zizmor:\s*ignore|--ignore-vuln\b|(?:^|\s)(?:SKIP|BANDIT_CONFIG)\s*=)"
 )
 REVIEWABLE_SUFFIXES = (".py", ".js", ".sh", ".yaml", ".yml", ".toml", ".json")
+ACTION_PIN = re.compile(
+    r"(?P<target> +(?:- +)?uses: +[A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+)"
+    r"@[0-9a-fA-F]{40}(?: +# v[0-9][0-9A-Za-z.+-]*)?"
+)
+
+
+def is_dependabot_action_update(
+    pull_request: dict[str, object],
+    files: list[dict[str, object]],
+    repository: str,
+) -> bool:
+    user = pull_request.get("user")
+    head = pull_request.get("head")
+    if not isinstance(user, dict) or not isinstance(head, dict):
+        return False
+    if (
+        user.get("login") != "dependabot[bot]"
+        or user.get("id") != 49699333
+        or user.get("type") != "Bot"
+    ):
+        return False
+    head_repository = head.get("repo")
+    if (
+        not isinstance(head_repository, dict)
+        or head_repository.get("full_name") != repository
+        or not str(head.get("ref", "")).startswith("dependabot/github_actions/")
+        or not files
+    ):
+        return False
+
+    for file in files:
+        if (
+            not re.fullmatch(r"\.github/workflows/[^/]+\.ya?ml", str(file["filename"]))
+            or file.get("status") != "modified"
+            or file.get("previous_filename")
+        ):
+            return False
+        patch = file.get("patch")
+        if not isinstance(patch, str):
+            return False
+        before: list[tuple[str, str]] = []
+        after: list[tuple[str, str]] = []
+        additions = 0
+        deletions = 0
+        for line in patch.splitlines():
+            if line.startswith(("@@ ", " ")):
+                before.append(("context", line))
+                after.append(("context", line))
+            elif line.startswith(("+", "-")):
+                match = ACTION_PIN.fullmatch(line[1:])
+                if match is None:
+                    return False
+                if line.startswith("+"):
+                    after.append(("pin", match["target"]))
+                    additions += 1
+                else:
+                    before.append(("pin", match["target"]))
+                    deletions += 1
+            else:
+                return False
+        if (
+            not additions
+            or before != after
+            or additions != file.get("additions")
+            or deletions != file.get("deletions")
+        ):
+            return False
+    return True
 
 
 def protected_changes(files: list[dict[str, object]]) -> list[str]:
@@ -125,7 +193,7 @@ def main() -> int:
         raise ValueError("The complete PR diff could not be verified.")
 
     changes = protected_changes(files)
-    if changes:
+    if changes and not is_dependabot_action_update(current, files, repository):
         author = current["user"]["login"]
         for login in {author, event["sender"]["login"]}:
             permission = github_request(f"{prefix}/collaborators/{login}/permission")

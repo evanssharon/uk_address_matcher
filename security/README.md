@@ -74,12 +74,22 @@ protection or an organisation ruleset for `main`:
    `CODEOWNERS` file alone cannot prevent a privileged administrator disabling controls.
 
 The policy rejects protected-file changes unless both the PR author and triggering
-actor have administrator or maintainer roles. It checks renamed paths and new inline
-suppressions, rejects incomplete source diffs, paginates the GitHub file list, and
-fails closed on API failures, oversized PRs, or a changing head SHA. Protected paths
-include manifests and lockfiles because these can change scanner tools and execution.
-Maintainers must recreate approved Dependabot proposals as maintainer-owned PRs; bots
-deliberately receive no exemption.
+actor have administrator or maintainer roles, with one narrow Dependabot exception:
+an official bot-authored PR from this repository's `dependabot/github_actions/`
+branches may update only full 40-character action SHAs and version comments in
+existing workflow files. Action names, indentation, step order and all other lines
+must remain unchanged. The complete diff must be available and match GitHub's change
+counts. Bot identity is checked by login, numeric account ID and account type;
+ordinary users and other bots receive no exemption. Code-owner approval and the
+other required checks still apply before merging these updates.
+
+The policy also checks renamed paths and new inline suppressions, rejects incomplete
+source diffs, paginates the GitHub file list, and fails closed on API failures,
+oversized PRs, or a changing head SHA. Protected paths include manifests and lockfiles
+because these can change scanner tools and execution. Maintainers must recreate
+other approved Dependabot proposals, including manifest and lockfile updates, as
+maintainer-owned PRs. Dependabot cannot change permissions, commands, baselines or
+the policy implementation through the exception.
 
 Confirm `moj-analytical-services/data_linking` exists, is visible to this repository,
 has write access for valid code ownership, and has an appropriate maintain/admin
