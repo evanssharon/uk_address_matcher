@@ -3,6 +3,8 @@ name: PR benchmark reminder
 on:
   pull_request_target:
     branches: [main]
+    paths:
+      - 'uk_address_matcher/**'
     types:
       - opened
       - reopened
