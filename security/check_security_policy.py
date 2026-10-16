@@ -23,6 +23,7 @@ PROTECTED_PATHS = (
     "package.json",
     "package-lock.json",
     ".npmrc",
+    "frontend/labelling/*",
     "dev_scripts/check_secrets.py",
     "dev_scripts/audit_dependencies.py",
     "dev_scripts/*security*.py",

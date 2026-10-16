@@ -9,9 +9,7 @@ on:
       - "uk_address_matcher/**"
       - "pyproject.toml"
       - "uv.lock"
-      - "package.json"
-      - "package-lock.json"
-      - "vite.config.js"
+      - "frontend/labelling/**"
       - ".github/workflows/**"
 
 permissions:
@@ -37,6 +35,7 @@ jobs:
           package-manager-cache: false
 
       - name: Build labelling app assets
+        working-directory: frontend/labelling
         run: npm ci && npm run build
 
       - name: Set up Python

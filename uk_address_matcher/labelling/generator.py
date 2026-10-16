@@ -16,7 +16,8 @@ def _static_root() -> Path:
     if (static_root / "index.html").is_file():
         return static_root
     raise FileNotFoundError(
-        "The labelling app assets are not built. Run `npm ci && npm run build` first."
+        "The labelling app assets are not built. Run `npm ci && npm run build` "
+        "from frontend/labelling first."
     )
 
 
