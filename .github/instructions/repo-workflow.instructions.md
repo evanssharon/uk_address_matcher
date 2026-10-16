@@ -5,7 +5,7 @@ applyTo:
   - ".github/**/*.md"
   - "docs/developer/**/*.md"
   - "docs/findings/**/*.md"
-  - "CHANGELOG.md"
+  - "docs/CHANGELOG.md"
   - "pyproject.toml"
   - "shell/**/*.sh"
   - ".github/workflows/**/*.yml"
