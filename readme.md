@@ -107,6 +107,9 @@ Example output:
 
 ## Development
 
+Before proposing changes, read the [contribution guidelines](CONTRIBUTING.md),
+including scope agreement, documentation and AI-use expectations.
+
 Security checks and maintainer setup are documented in
 [developer security administration](security/README.md). Contributors should run the
 checks but leave security baselines and exceptions to maintainers. Report vulnerabilities
