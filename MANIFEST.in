@@ -1,5 +1,6 @@
 prune security
 prune .github
+prune frontend
 exclude .pre-commit-config.yaml
 exclude dev_scripts/check_secrets.py
 exclude dev_scripts/audit_dependencies.py

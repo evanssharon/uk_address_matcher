@@ -52,4 +52,5 @@ jobs:
         with:
           node-version: "22"
       - name: Audit locked dependencies without installing or executing packages
+        working-directory: frontend/labelling
         run: npm audit --package-lock-only --ignore-scripts --audit-level=high

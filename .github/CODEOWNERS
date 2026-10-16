@@ -13,6 +13,7 @@
 /package.json @moj-analytical-services/uk_address_matcher
 /package-lock.json @moj-analytical-services/uk_address_matcher
 /.npmrc @moj-analytical-services/uk_address_matcher
+/frontend/labelling/ @moj-analytical-services/uk_address_matcher
 /dev_scripts/check_secrets.py @moj-analytical-services/uk_address_matcher
 /dev_scripts/audit_dependencies.py @moj-analytical-services/uk_address_matcher
 /dev_scripts/*security*.py @moj-analytical-services/uk_address_matcher

@@ -9,7 +9,7 @@ must not change its contents. Runtime users do not need these tools or files.
 uv sync --locked --group security --group linting
 uv run --no-sync pre-commit install
 uv run --no-sync pre-commit run --all-files
-npm audit --package-lock-only --ignore-scripts --audit-level=high
+npm --prefix frontend/labelling audit --package-lock-only --ignore-scripts --audit-level=high
 uv run --no-sync pytest tests/test_security_checks.py
 ```
 

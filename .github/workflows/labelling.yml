@@ -6,9 +6,7 @@ on:
     paths:
       - "uk_address_matcher/labelling/**"
       - "tests/labelling/**"
-      - "package.json"
-      - "package-lock.json"
-      - "vite.config.js"
+      - "frontend/labelling/**"
       - "pyproject.toml"
       - "uv.lock"
       - ".github/workflows/labelling.yml"
@@ -17,9 +15,7 @@ on:
     paths:
       - "uk_address_matcher/labelling/**"
       - "tests/labelling/**"
-      - "package.json"
-      - "package-lock.json"
-      - "vite.config.js"
+      - "frontend/labelling/**"
       - "pyproject.toml"
       - "uv.lock"
       - ".github/workflows/labelling.yml"
@@ -46,6 +42,7 @@ jobs:
           node-version: "22"
 
       - name: Build labelling app assets
+        working-directory: frontend/labelling
         run: npm ci && npm run build
 
       - name: Check labelling app assets are current

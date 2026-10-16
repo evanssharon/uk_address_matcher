@@ -8,9 +8,7 @@ on:
       - "tests/**"
       - "pyproject.toml"
       - "uv.lock"
-      - "package.json"
-      - "package-lock.json"
-      - "vite.config.js"
+      - "frontend/labelling/**"
   push:
     branches: [main]
     paths:
@@ -18,9 +16,7 @@ on:
       - "tests/**"
       - "pyproject.toml"
       - "uv.lock"
-      - "package.json"
-      - "package-lock.json"
-      - "vite.config.js"
+      - "frontend/labelling/**"
 
 permissions:
   contents: read

@@ -60,6 +60,10 @@ def test_secrets_check_requires_maintained_baseline(tmp_path: Path) -> None:
         "dev_scripts/check_secrets.py",
         "pyproject.toml",
         "uv.lock",
+        "frontend/labelling/package.json",
+        "frontend/labelling/package-lock.json",
+        "frontend/labelling/vite.config.js",
+        "frontend/labelling/.npmrc",
     ],
 )
 def test_policy_protects_security_controls(filename: str) -> None:
@@ -70,6 +74,39 @@ def test_policy_protects_renamed_controls() -> None:
     assert protected_changes(
         [{"filename": "elsewhere.json", "previous_filename": "security/secrets.baseline"}]
     ) == ["elsewhere.json"]
+
+
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "labelling.yml",
+        "docs.yml",
+        "test-build-package.yaml",
+        "security.yml",
+        "run_pytest.yml",
+    ],
+)
+def test_frontend_workflows_use_relocated_project(filename: str) -> None:
+    workflow_path = Path(__file__).parents[1] / ".github" / "workflows" / filename
+    workflow = yaml.load(
+        workflow_path.read_text(encoding="utf-8"), Loader=yaml.BaseLoader
+    )
+    for job in workflow["jobs"].values():
+        for step in job.get("steps", []):
+            if "npm " in step.get("run", ""):
+                assert step["working-directory"] == "frontend/labelling"
+    for event in workflow["on"].values():
+        if isinstance(event, dict) and "paths" in event:
+            assert "frontend/labelling/**" in event["paths"]
+
+
+def test_dependabot_tracks_relocated_frontend() -> None:
+    config_path = Path(__file__).parents[1] / ".github" / "dependabot.yml"
+    config = yaml.load(config_path.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
+    update = next(
+        update for update in config["updates"] if update["package-ecosystem"] == "npm"
+    )
+    assert update["directory"] == "/frontend/labelling"
 
 
 @pytest.mark.parametrize(
