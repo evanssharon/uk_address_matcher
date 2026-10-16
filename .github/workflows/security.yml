@@ -36,10 +36,10 @@ jobs:
       - name: Scan tracked files, Python dependencies and workflows
         env:
           SKIP: bandit
-        run: uv run --no-sync pre-commit run --all-files
+        run: uv run --no-sync pre-commit run --all-files --config security/pre-commit-config.yaml
       - name: Ensure security controls were not modified by scanners
         if: always()
-        run: git diff --exit-code -- security .pre-commit-config.yaml pyproject.toml uv.lock
+        run: git diff --exit-code -- security pyproject.toml uv.lock
 
   javascript-audit:
     name: JavaScript dependency audit

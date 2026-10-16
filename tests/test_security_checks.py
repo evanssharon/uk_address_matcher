@@ -53,6 +53,7 @@ def test_secrets_check_requires_maintained_baseline(tmp_path: Path) -> None:
     "filename",
     [
         "security/secrets.baseline",
+        "security/pre-commit-config.yaml",
         "security/nested/exception.json",
         ".github/workflows/security.yml",
         ".github/CODEOWNERS",
@@ -394,7 +395,7 @@ def test_policy_fails_closed_on_incomplete_or_oversized_diffs(
     ],
 )
 def test_bandit_scans_only_core_python_directories(filename: str, expected: bool) -> None:
-    config_path = Path(__file__).parents[1] / ".pre-commit-config.yaml"
+    config_path = Path(__file__).parents[1] / "security" / "pre-commit-config.yaml"
     config = yaml.load(config_path.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
     hook = next(hook for hook in config["repos"][0]["hooks"] if hook["id"] == "bandit")
     assert bool(re.search(hook["files"], filename)) is expected
@@ -409,6 +410,10 @@ def test_ci_temporarily_skips_only_bandit() -> None:
     steps = workflow["jobs"]["security"]["steps"]
     scan = next(
         step for step in steps if "pre-commit run --all-files" in step.get("run", "")
+    )
+    assert scan["run"] == (
+        "uv run --no-sync pre-commit run --all-files "
+        "--config security/pre-commit-config.yaml"
     )
     assert scan["env"] == {"SKIP": "bandit"}
 

@@ -7,11 +7,13 @@ must not change its contents. Runtime users do not need these tools or files.
 
 ```bash
 uv sync --locked --group security --group linting
-uv run --no-sync pre-commit install
-uv run --no-sync pre-commit run --all-files
+uv run --no-sync pre-commit install --config security/pre-commit-config.yaml
+uv run --no-sync pre-commit run --all-files --config security/pre-commit-config.yaml
 npm --prefix frontend/labelling audit --package-lock-only --ignore-scripts --audit-level=high
 uv run --no-sync pytest tests/test_security_checks.py
 ```
+
+Reinstall existing hooks with the command above after the configuration moves.
 
 The secret checker copies the maintained baseline into a temporary directory. Metadata
 updates happen only in that disposable copy; neither contributor hooks nor CI update
