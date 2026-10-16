@@ -1291,3 +1291,67 @@ def test_peeled_address_stripped_matching_is_enabled_by_default(duck_con):
         "and punctuation"
     )
     assert disabled_row is None
+
+
+@pytest.mark.parametrize(
+    "stage_kind, inward_cap, canonical_postcode",
+    [
+        ("exact", 0, "E8 1AA"),
+        ("exact", 1, "E8 1AB"),
+        ("exact_flat", 0, "E8 1AA"),
+        ("peeled", 0, "E8 1AA"),
+        ("peeled", 1, "E8 1AB"),
+    ],
+)
+@pytest.mark.parametrize("include_exact_candidate", [False, True])
+@pytest.mark.parametrize(
+    "source_number, conflicting_number",
+    [("12", "1-2"), ("1-2", "12"), ("1 2", "12"), ("12", "1 2")],
+)
+def test_deterministic_stripping_preserves_numeric_boundaries(
+    duck_con,
+    stage_kind,
+    inward_cap,
+    canonical_postcode,
+    include_exact_candidate,
+    source_number,
+    conflicting_number,
+):
+    projection = """
+        SELECT unique_id, address AS original_address_concat,
+               address AS clean_full_address, '{postcode}' AS postcode,
+               []::VARCHAR[] AS peeled_tokens_list,
+               regexp_extract_all(address, '[0-9]+(?:[-/][0-9]+)*') AS numeric_tokens,
+               starts_with(address, 'FLAT ') AS has_flat_indicator,
+               NULL::VARCHAR AS flat_positional, NULL::VARCHAR AS flat_letter,
+               CASE WHEN starts_with(address, 'FLAT ')
+                    THEN regexp_extract(address, '[0-9]+') END AS flat_number,
+               FALSE AS has_business_unit, NULL::VARCHAR AS business_unit_type,
+               NULL::VARCHAR AS business_unit_id,
+               NULL::VARCHAR AS sub_premise_location, ukam_address_id
+        FROM ({rows}) AS input(unique_id, address, ukam_address_id)
+    """
+    prefix = "FLAT " if stage_kind == "exact_flat" else ""
+    suffix = " HACKNEY LONDON" if stage_kind == "peeled" else ""
+    source_address = f"{prefix}{source_number} TEST LANE{suffix}"
+    messy = duck_con.sql(
+        projection.format(
+            rows=f"VALUES (1, '{source_address}', 90::BIGINT)", postcode="E8 1AA"
+        )
+    )
+    canonical_rows = f"VALUES (1000, '{conflicting_number} TESTLANE', 10::BIGINT)"
+    if include_exact_candidate:
+        canonical_rows += f", (1001, '{source_number} TESTLANE', 20::BIGINT)"
+    canonical = duck_con.sql(
+        projection.format(rows=canonical_rows, postcode=canonical_postcode)
+    )
+    stage_type = PeeledAddressStage if stage_kind == "peeled" else ExactMatchStage
+    results, _ = _run_matching(
+        con=duck_con,
+        df_messy_clean=messy,
+        df_canonical_clean=canonical,
+        stages=[stage_type(inward_postcode_levenshtein=inward_cap)],
+    )
+    assert results.select("resolved_canonical_id").fetchone()[0] == (
+        1001 if include_exact_candidate else None
+    )

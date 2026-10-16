@@ -193,6 +193,8 @@ def _peeled_address_matches(
                 ON split_part(messy.postcode, ' ', 1)
                     = split_part(canon.postcode, ' ', 1)
                 AND messy.match_key = canon.match_key
+                AND regexp_extract_all(messy.peeled_address, '[0-9]+')
+                    = regexp_extract_all(canon.peeled_address, '[0-9]+')
             WHERE messy.postcode IS NOT NULL
             AND canon.postcode IS NOT NULL
             AND split_part(messy.postcode, ' ', 2) <> ''
@@ -341,6 +343,8 @@ def _peeled_address_matches(
             INNER JOIN {{stripped_canonical}} AS canon
                 ON messy.postcode = canon.postcode
                 AND messy.compact_peeled_address = canon.compact_peeled_address
+                AND regexp_extract_all(messy.peeled_address, '[0-9]+')
+                    = regexp_extract_all(canon.peeled_address, '[0-9]+')
             WHERE messy.compact_peeled_address <> ''
             AND (messy.did_peel OR canon.did_peel)
             AND (
