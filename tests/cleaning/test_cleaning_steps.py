@@ -9,6 +9,7 @@ from uk_address_matcher.cleaning.chunking_strategies import (
 )
 from uk_address_matcher.cleaning.steps import (
     _derive_numeric_range,
+    _derive_numeric_reference_flags,
     _parse_out_address_structure_premise,
     _parse_out_business_unit,
     _parse_out_flat_position_and_letter,
@@ -18,6 +19,7 @@ from uk_address_matcher.cleaning.steps import (
     _separate_distinguishing_start_tokens_from_with_respect_to_adjacent_records,
     _separate_unusual_tokens,
     _split_numeric_tokens_to_cols,
+    _use_first_unusual_token_if_no_numeric_token,
 )
 from uk_address_matcher.sql_pipeline.runner import DebugOptions, DuckDBPipeline
 
@@ -184,12 +186,64 @@ def test_parse_out_numbers_excludes_road_references():
             ) AS source(clean_full_address, flat_letter, expected_numeric_tokens)
         """)
         result = _run_single_stage(_parse_out_numbers, source, connection)
-        assert result.filter("""
+        assert (
+            result.filter("""
             numeric_tokens IS DISTINCT FROM expected_numeric_tokens
             OR clean_full_address IS DISTINCT FROM original_address
-        """).fetchall() == []
+        """).fetchall()
+            == []
+        )
         assert result.count("*").fetchone()[0] == 20
         assert "__numeric_token_address" not in result.columns
+
+
+def test_numeric_reference_flags_preserve_regex_semantics():
+    with duckdb.connect() as connection:
+        source = connection.sql("""
+            SELECT * FROM (VALUES
+                (NULL, NULL, NULL, NULL),
+                ('FARM', []::VARCHAR[], true, NULL),
+                ('FARM2', []::VARCHAR[], false, NULL),
+                ('farm', []::VARCHAR[], false, NULL),
+                ('', []::VARCHAR[], false, NULL),
+                ('12', ['12'], false, false),
+                ('A90', ['A90'], false, true),
+                ('U123A', ['U123A'], false, true),
+                ('C4', ['C4'], false, true),
+                ('D4', ['D4'], false, false),
+                ('12', ['12', 'A90'], false, false),
+                ('A90', ['A90 ROAD'], false, false)
+            ) AS source(
+                numeric_token_1, numeric_tokens, expected_lexical, expected_coded
+            )
+        """)
+        result = _run_single_stage(_derive_numeric_reference_flags, source, connection)
+        assert (
+            result.filter("""
+            numeric_token_1_is_lexical IS DISTINCT FROM expected_lexical
+            OR first_numeric_token_is_coded_road IS DISTINCT FROM expected_coded
+        """).fetchall()
+            == []
+        )
+        assert result.count("*").fetchone()[0] == 12
+
+
+def test_numeric_reference_flags_use_the_final_lexical_fallback():
+    with duckdb.connect() as connection:
+        source = connection.sql("""
+            SELECT NULL::VARCHAR AS numeric_token_1,
+                []::VARCHAR[] AS numeric_tokens,
+                {'tok': 'DEMO', 'rel_freq': 1e-7} AS first_unusual_token,
+                [{'tok': 'DEMO', 'rel_freq': 1e-7}] AS token_rel_freq_arr
+        """)
+        fallback = _run_single_stage(
+            _use_first_unusual_token_if_no_numeric_token, source, connection
+        )
+        result = _run_single_stage(_derive_numeric_reference_flags, fallback, connection)
+        assert result.select(
+            "numeric_token_1, numeric_token_1_is_lexical, "
+            "first_numeric_token_is_coded_road"
+        ).fetchone() == ("DEMO", True, None)
 
 
 def test_separate_unusual_tokens_preserves_source_order_for_frequency_ties():
