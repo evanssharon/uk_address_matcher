@@ -6,8 +6,7 @@ on:
       - "**/*.py"
       - "pyproject.toml"
 
-permissions:
-  contents: read
+permissions: {}
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -17,6 +16,8 @@ jobs:
   lint:
     name: Lint with Ruff
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
 
     steps:
       - name: Checkout repository
@@ -29,9 +30,8 @@ jobs:
         with:
           version: "0.11.3"
           python-version: "3.12"
-          enable-cache: true
+          enable-cache: false
           activate-environment: true
-          cache-dependency-glob: "uv.lock"
 
       - name: Set up Python
         run: uv python install

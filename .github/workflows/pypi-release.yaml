@@ -5,8 +5,7 @@ on:
     tags:
       - "v*.*.*"
 
-permissions:
-  contents: read
+permissions: {}
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -15,18 +14,26 @@ concurrency:
 jobs:
   run-pytest:
     name: Run pytest matrix checks
+    permissions:
+      contents: read
     uses: ./.github/workflows/run_pytest.yml
 
   test-build-package:
     name: Test build package
+    permissions:
+      contents: read
     uses: ./.github/workflows/test-build-package.yaml
 
   test-labelling:
     name: Test labelling app
+    permissions:
+      contents: read
     uses: ./.github/workflows/labelling.yml
 
   security:
     name: Run security checks
+    permissions:
+      contents: read
     uses: ./.github/workflows/security.yml
 
   publish:

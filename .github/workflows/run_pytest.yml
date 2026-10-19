@@ -18,8 +18,7 @@ on:
       - "uv.lock"
       - "frontend/labelling/**"
 
-permissions:
-  contents: read
+permissions: {}
 
 concurrency:
   group: run-pytest-${{ github.event.pull_request.number || github.ref }}
@@ -28,6 +27,8 @@ concurrency:
 jobs:
   run-pytest:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -47,8 +48,7 @@ jobs:
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           version: "0.11.3"
-          enable-cache: true
-          cache-dependency-glob: "uv.lock"
+          enable-cache: false
 
       - name: Install dependencies
         run: uv sync --all-extras --dev --group model-training --locked
