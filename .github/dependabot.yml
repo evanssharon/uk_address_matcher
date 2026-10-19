@@ -2,14 +2,14 @@ version: 2
 updates:
   - package-ecosystem: uv
     directory: /
+    allow:
+      - dependency-type: all
     schedule:
       interval: cron
       cronjob: '0 9 1,15 * *'
     cooldown:
       default-days: 7
     open-pull-requests-limit: 10
-    reviewers:
-      - moj-analytical-services/uk_address_matcher
   - package-ecosystem: npm
     directory: /frontend/labelling
     schedule:
@@ -18,8 +18,6 @@ updates:
     cooldown:
       default-days: 7
     open-pull-requests-limit: 10
-    reviewers:
-      - moj-analytical-services/uk_address_matcher
   - package-ecosystem: github-actions
     directory: /
     schedule:
@@ -28,5 +26,3 @@ updates:
     cooldown:
       default-days: 7
     open-pull-requests-limit: 10
-    reviewers:
-      - moj-analytical-services/uk_address_matcher
