@@ -769,6 +769,9 @@ def _parse_out_numbers():
     It also captures ranges like '1-2', '12-17', '98-102' as a single 'number', and
     matches patterns like '20A', 'A20', '20', and '20-21'.
 
+    Road references such as 'A96T', 'C110S', and 'A 952' are excluded unless
+    explicitly labelled as a flat, unit, or other premise identifier.
+
     Special case: If flat_letter is a number, the first number found will be ignored
     as it's likely a duplicate of the flat number.
 
@@ -785,9 +788,15 @@ def _parse_out_numbers():
         r"(\d{1,5}[A-Za-z]?-\d{1,5}[A-Za-z]?|[A-Za-z]?\d{1,5}[A-Za-z]?)"
         r"\b"  # Word boundary
     )
+    road_code_pattern = (
+        r"\b((?:FLAT|APARTMENT|UNIT|SUITE|OFFICE|ROOM|BUILDING|BLOCK|PLOT|GARAGE|BAY|"
+        r"SHOP|FLOOR|LEVEL|WORKSHOP|WAREHOUSE|STUDIO|CONTAINER|PLATFORM|MAST|YARD|"
+        r"PARKING SPACE)\s+[ABCU]\s*\d+[A-Z]?)\b"
+        r"|\b[ABCU]\s*\d+[A-Z]?\b"
+    )
     sql = f"""
     SELECT
-        *,
+        * EXCLUDE (__numeric_token_address),
         regexp_replace(
             clean_full_address,
             '{regex_pattern}',
@@ -796,11 +805,16 @@ def _parse_out_numbers():
         ) AS address_without_numbers,
         CASE
             WHEN flat_letter IS NOT NULL AND flat_letter ~ '^\\d+$' THEN
-            regexp_extract_all(clean_full_address, '{regex_pattern}')[2:]
+            regexp_extract_all(__numeric_token_address, '{regex_pattern}')[2:]
             ELSE
-                regexp_extract_all(clean_full_address, '{regex_pattern}')
+                regexp_extract_all(__numeric_token_address, '{regex_pattern}')
         END AS numeric_tokens
-    FROM {{input}}
+    FROM (
+        SELECT *, regexp_replace(
+            clean_full_address, '{road_code_pattern}', '\\1', 'g'
+        ) AS __numeric_token_address
+        FROM {{input}}
+    ) AS numbers_input
     """
     return sql
 
