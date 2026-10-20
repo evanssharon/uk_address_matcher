@@ -27,6 +27,18 @@ Bandit scans only Python files under `uk_address_matcher/`, `benchmarking/` and
 `SKIP: bandit` in `.github/workflows/security.yml`. To restore it in CI, remove
 that setting and update the regression test for the temporary skip.
 
+## Dependency maintenance
+
+Direct runtime requirements are limited to DuckDB and Splink. SQLGlot remains a
+transitive Splink dependency; development, documentation, training and security
+tools stay in separate dependency groups rather than runtime requirements.
+
+Dependabot checks the Python lockfile, frontend npm project and pinned GitHub
+Actions at 09:00 UTC on the first and fifteenth of each month. Version updates have
+a seven-day cooldown. Python updates include indirect dependencies in `uv.lock`.
+Dependabot security updates are enabled separately in GitHub settings and are not
+delayed by the version-update schedule or cooldown.
+
 ## Exception review
 
 Fix a genuine issue rather than suppress it. For a justified exception, create a

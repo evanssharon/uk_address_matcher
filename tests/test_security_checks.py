@@ -102,13 +102,25 @@ def test_frontend_workflows_use_relocated_project(filename: str) -> None:
             assert "frontend/labelling/**" in event["paths"]
 
 
-def test_dependabot_tracks_relocated_frontend() -> None:
+@pytest.mark.parametrize(
+    ("ecosystem", "directory"),
+    [("uv", "/"), ("npm", "/frontend/labelling"), ("github-actions", "/")],
+)
+def test_dependabot_tracks_dependencies_with_cooldowns(
+    ecosystem: str, directory: str
+) -> None:
     config_path = Path(__file__).parents[1] / ".github" / "dependabot.yml"
     config = yaml.load(config_path.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
     update = next(
-        update for update in config["updates"] if update["package-ecosystem"] == "npm"
+        update for update in config["updates"] if update["package-ecosystem"] == ecosystem
     )
-    assert update["directory"] == "/frontend/labelling"
+    assert update["directory"] == directory
+    assert update["cooldown"] == {"default-days": "7"}
+    assert update["schedule"] == {"interval": "cron", "cronjob": "0 9 1,15 * *"}
+    assert "reviewers" not in update
+    assert int(update["open-pull-requests-limit"]) > 0
+    if ecosystem == "uv":
+        assert update["allow"] == [{"dependency-type": "all"}]
 
 
 @pytest.mark.parametrize(
