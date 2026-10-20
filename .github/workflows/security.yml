@@ -9,8 +9,7 @@ on:
   workflow_dispatch:
   workflow_call:
 
-permissions:
-  contents: read
+permissions: {}
 
 concurrency:
   group: security-${{ github.event.pull_request.number || github.ref }}
@@ -20,6 +19,8 @@ jobs:
   security:
     name: Security and workflow audit
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -44,6 +45,8 @@ jobs:
   javascript-audit:
     name: JavaScript dependency audit
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -51,6 +54,7 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22"
+          package-manager-cache: false
       - name: Audit locked dependencies without installing or executing packages
         working-directory: frontend/labelling
         run: npm audit --package-lock-only --ignore-scripts --audit-level=high

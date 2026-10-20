@@ -1,7 +1,7 @@
 name: PR benchmark reminder
 
 on:
-  pull_request_target:
+  pull_request:
     branches: [main]
     paths:
       - 'uk_address_matcher/**'
@@ -10,8 +10,7 @@ on:
       - reopened
       - synchronize
 
-permissions:
-  contents: read
+permissions: {}
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -20,10 +19,10 @@ concurrency:
 jobs:
   benchmark-reminder:
     runs-on: ubuntu-latest
-    permissions: {contents: read, pull-requests: write}
+    permissions: {}
 
     steps:
-      - name: Write sticky PR reminder
+      - name: Write benchmark reminder to job summary
         env:
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
@@ -40,16 +39,8 @@ jobs:
             '  -d rhondda,aberdeenshire,hackney,mid_sussex' \
             '```' \
             '' \
-            'This comment updates automatically whenever a new commit is pushed to the PR.' \
+            'This summary is regenerated whenever a new commit triggers this workflow.' \
             '' \
             '> [!NOTE]' \
             '> If you have changed the cleaning, you will need to rerun cleaning prep in order to test these changes successfully.' \
-            > github-comment.md
-
-      - name: Comment on PR (sticky)
-        uses: marocchino/sticky-pull-request-comment@5770ad5eb8f42dd2c4f34da00c94c5381e49af88 # v3.0.5
-        with:
-          header: benchmark-regression-reminder
-          path: github-comment.md
-          hide_and_recreate: false
-          skip_unchanged: false
+            >> "$GITHUB_STEP_SUMMARY"

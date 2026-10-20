@@ -56,26 +56,40 @@ and other legacy findings require individual maintainer review before the full s
 pass. Bandit's baseline matching can be broader than an individual source statement;
 do not treat a file-level baseline entry as proof that future SQL changes are safe.
 
-`zizmor.yml` allows the dangerous-trigger rule only for three reviewed workflows:
+All workflows default to `permissions: {}` and grant permissions per job. Read-only
+build and test jobs do not inherit publishing or comment permissions. Reusable-workflow
+callers explicitly grant the read permission their called jobs require.
 
-- `security-policy.yml` checks out the immutable base SHA, uses standard-library code,
-  reads PR metadata, and never installs or executes PR code.
-- `edge_cases_publish_comment.yml` executes no checkout or artefact code. It validates
-   the originating run, associated PR, current SHA, artefact ID, size and regular-file
-   status before treating the artefact solely as Markdown comment data. Ambiguous or
-  stale results remain in the unprivileged test summary instead.
-- `pr_benchmark_reminder.yml` checks out no code and renders only quoted metadata into
-  a fixed reminder, with comment permission restricted to its single job.
+Remote actions use full commit SHAs; local reusable workflows use the calling commit.
+Shared GitHub Actions caches are disabled, including uv caching and Node's automatic
+package-manager cache. Ephemeral dependency downloads are not restored from another run.
+Neither `pull_request_target` nor `workflow_run` is permitted. `zizmor.yml` has no
+dangerous-trigger exceptions; regression tests check every workflow for these controls.
 
-Other `zizmor` findings of medium-or-higher severity still block CI. Informational and
+The benchmark reminder and edge-case results appear in job summaries. Edge-case
+comment publication is an explicit maintainer action on `main`, not an automatic
+privileged follow-up to contributor code. To publish an existing completed PR run:
+
+```bash
+gh workflow run edge_cases_publish_comment.yml --ref main -f run_id=WORKFLOW_RUN_ID
+```
+
+The publisher validates the originating workflow, repository, associated open PR,
+current SHA, artefact ID, size and regular-file status. It checks out no code and
+treats the artefact solely as Markdown. Ambiguous or stale results are not published.
+
+`zizmor` findings of medium-or-higher severity still block CI. Informational and
 low-severity style findings remain available through a scan without `--min-severity`.
 
 ## GitHub setup and bootstrap
 
-Merge the initial controls through a trusted maintainer PR before requiring the new
-checks. The trusted policy workflow is loaded from the default branch: it cannot
-protect its own first introduction. Once the workflows have run, configure branch
-protection or an organisation ruleset for `main`:
+Merge controls through a reviewed maintainer PR before requiring new checks. The
+policy job checks out the immutable base SHA and runs only standard-library policy
+code, with read-only permissions. Its workflow definition is loaded from the PR,
+however, so it is not an independent, immutable security boundary. Keep required team
+reviews and protected workflow ownership; use organisation-managed required workflows
+for enforcement that a PR cannot edit. Configure branch protection or a ruleset for
+`main`:
 
 1. Require PRs, code-owner approval, dismissal of stale approvals, and approval of the
    latest push by someone other than the pusher.
@@ -115,6 +129,12 @@ On 2026-10-14, the repository had code-owner review and stale-approval dismissal
 but no rulesets; administrators could bypass protection and force-pushes were allowed.
 Secret scanning and push protection were enabled; Dependabot security updates were not.
 Repository settings are not changed by committing these files.
+
+In Actions settings, require full commit-SHA references, keep the default token
+read-only with PR-approval permission disabled, and require workflow approval for
+all external contributors. These live settings must be checked separately from
+workflow YAML. Full SHA pinning covers direct references, not an action's transitive
+dependencies or the correctness of the referenced commit.
 
 ## Private labels and publishing
 

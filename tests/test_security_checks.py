@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import secrets
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -430,6 +431,161 @@ def test_ci_temporarily_skips_only_bandit() -> None:
     assert scan["env"] == {"SKIP": "bandit"}
 
 
+@pytest.mark.parametrize(
+    "workflow_path",
+    sorted((Path(__file__).parents[1] / ".github" / "workflows").glob("*.y*ml")),
+    ids=lambda path: path.name,
+)
+def test_workflows_enforce_actions_security_policy(workflow_path: Path) -> None:
+    workflow = yaml.load(
+        workflow_path.read_text(encoding="utf-8"), Loader=yaml.BaseLoader
+    )
+    assert workflow["permissions"] == {}
+    assert not {"pull_request_target", "workflow_run"}.intersection(workflow["on"])
+    allowed_writes = {
+        ("docs.yml", "deploy"): {"pages", "id-token"},
+        ("pypi-release.yaml", "publish"): {"id-token"},
+        ("edge_cases_publish_comment.yml", "comment"): {"pull-requests"},
+    }
+    for name, job in workflow["jobs"].items():
+        assert isinstance(job.get("permissions"), dict)
+        for scope, permission in job["permissions"].items():
+            assert permission == "read" or (
+                permission == "write"
+                and scope in allowed_writes.get((workflow_path.name, name), set())
+            )
+        for action in [job, *job.get("steps", [])]:
+            reference = action.get("uses", "")
+            if reference and not reference.startswith("./"):
+                assert re.fullmatch(r"[^@\s]+@[0-9a-f]{40}", reference)
+            assert not reference.startswith("actions/cache@")
+            settings = action.get("with", {})
+            if reference.startswith("astral-sh/setup-uv@"):
+                assert settings.get("enable-cache") == "false"
+            if reference.startswith("actions/setup-node@"):
+                assert settings.get("package-manager-cache") == "false"
+                assert not settings.get("cache")
+            if reference.startswith("actions/setup-python@"):
+                assert not settings.get("cache")
+
+
+def test_workflow_scanner_has_no_control_exemptions() -> None:
+    config_path = Path(__file__).parents[1] / "security" / "zizmor.yml"
+    config = yaml.load(config_path.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
+    for rule in ["dangerous-triggers", "unpinned-uses", "excessive-permissions"]:
+        assert not config.get("rules", {}).get(rule, {}).get("ignore")
+
+
+def test_edge_case_comment_publication_requires_manual_main_dispatch() -> None:
+    workflow_path = (
+        Path(__file__).parents[1]
+        / ".github"
+        / "workflows"
+        / "edge_cases_publish_comment.yml"
+    )
+    workflow = yaml.load(
+        workflow_path.read_text(encoding="utf-8"), Loader=yaml.BaseLoader
+    )
+    assert set(workflow["on"]) == {"workflow_dispatch"}
+    assert workflow["on"]["workflow_dispatch"]["inputs"]["run_id"]["required"] == "true"
+    job = workflow["jobs"]["comment"]
+    assert job["if"] == "github.ref == 'refs/heads/main'"
+    assert all("actions/checkout@" not in step.get("uses", "") for step in job["steps"])
+    validation = job["steps"][0]["with"]["script"]
+    assert "Number.isSafeInteger(runId)" in validation
+    assert "github.rest.actions.getWorkflowRun" in validation
+    assert "run.path !== '.github/workflows/edge_cases_github_comment.yml'" in validation
+    assert "pr.head.sha !== run.head_sha" in validation
+    assert job["steps"][1]["with"]["run-id"] == "${{ steps.validate.outputs.run_id }}"
+
+
+@pytest.mark.skipif(
+    shutil.which("node") is None, reason="Node is required for workflow JS"
+)
+@pytest.mark.parametrize(
+    ("scenario", "expected"),
+    [
+        ({}, "valid"),
+        ({"run_id": "1; process.exit(0)"}, "failed"),
+        ({"path": ".github/workflows/other.yml"}, "failed"),
+        ({"status": "in_progress"}, "failed"),
+        ({"event": "push"}, "failed"),
+        ({"pr_sha": "stale"}, "skipped"),
+        ({"size": 100001}, "failed"),
+        ({"repository": "outside/repository"}, "skipped"),
+    ],
+)
+def test_manual_comment_validator_rejects_untrusted_runs(
+    scenario: dict[str, object], expected: str
+) -> None:
+    workflow_path = (
+        Path(__file__).parents[1]
+        / ".github"
+        / "workflows"
+        / "edge_cases_publish_comment.yml"
+    )
+    workflow = yaml.load(
+        workflow_path.read_text(encoding="utf-8"), Loader=yaml.BaseLoader
+    )
+    script = workflow["jobs"]["comment"]["steps"][0]["with"]["script"]
+    harness = """
+        const { script, scenario } = JSON.parse(process.argv[1]);
+        process.env.RUN_ID = scenario.run_id ?? '123';
+        const outputs = {};
+        const failures = [];
+        const context = {repo: {owner: 'example', repo: 'repository'}};
+        const core = {
+            info: () => {},
+            setFailed: message => failures.push(message),
+            setOutput: (name, value) => { outputs[name] = value; },
+        };
+        const github = {rest: {
+            actions: {
+                getWorkflowRun: async () => ({data: {
+                    event: scenario.event ?? 'pull_request',
+                    status: scenario.status ?? 'completed',
+                    path: scenario.path ??
+                        '.github/workflows/edge_cases_github_comment.yml',
+                    repository: {full_name: scenario.repository ?? 'example/repository'},
+                    pull_requests: [{number: 17}],
+                    head_sha: 'current',
+                }}),
+                listWorkflowRunArtifacts: async () => ({data: {artifacts: [{
+                    name: 'edge-cases-comment', id: 23, expired: false,
+                    size_in_bytes: scenario.size ?? 500,
+                }]}}),
+            },
+            pulls: {get: async () => ({data: {
+                state: 'open', head: {sha: scenario.pr_sha ?? 'current'},
+            }})},
+        }};
+        const AsyncFunction = Object.getPrototypeOf(async function() {}).constructor;
+        new AsyncFunction('github', 'context', 'core', script)(github, context, core)
+            .then(() => console.log(JSON.stringify({outputs, failures})))
+            .catch(error => { console.error(error); process.exitCode = 1; });
+    """
+    result = subprocess.run(
+        ["node", "-e", harness, json.dumps({"script": script, "scenario": scenario})],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    outcome = json.loads(result.stdout)
+    if expected == "valid":
+        assert outcome == {
+            "outputs": {
+                "number": "17",
+                "artifact_id": "23",
+                "run_id": "123",
+                "head_sha": "current",
+            },
+            "failures": [],
+        }
+    else:
+        assert outcome["outputs"] == {}
+        assert bool(outcome["failures"]) is (expected == "failed")
+
+
 def test_trusted_policy_workflow_never_checks_out_pr_head() -> None:
     workflow_path = (
         Path(__file__).parents[1] / ".github" / "workflows" / "security-policy.yml"
@@ -437,8 +593,12 @@ def test_trusted_policy_workflow_never_checks_out_pr_head() -> None:
     workflow = yaml.load(
         workflow_path.read_text(encoding="utf-8"), Loader=yaml.BaseLoader
     )
-    assert "pull_request_target" in workflow["on"]
-    assert workflow["permissions"] == {"contents": "read", "pull-requests": "read"}
+    assert set(workflow["on"]) == {"pull_request"}
+    assert workflow["permissions"] == {}
+    assert workflow["jobs"]["policy"]["permissions"] == {
+        "contents": "read",
+        "pull-requests": "read",
+    }
     steps = workflow["jobs"]["policy"]["steps"]
     assert steps[0]["with"]["ref"] == "${{ github.event.pull_request.base.sha }}"
     assert steps[0]["with"]["persist-credentials"] == "false"
