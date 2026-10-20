@@ -12,6 +12,7 @@ from uk_address_matcher.cleaning.steps import (
     _parse_out_address_structure_premise,
     _parse_out_business_unit,
     _parse_out_flat_position_and_letter,
+    _parse_out_numbers,
     _parse_out_sub_premise_location,
     _remove_duplicate_end_tokens,
     _separate_distinguishing_start_tokens_from_with_respect_to_adjacent_records,
@@ -154,6 +155,44 @@ def _run_legacy_adjacent_query(input_relation, connection):
         FROM maximum_suffix_lengths
         """
     )
+
+
+def test_parse_out_numbers_excludes_road_references():
+    with duckdb.connect() as connection:
+        source = connection.sql("""
+            SELECT *, clean_full_address AS original_address FROM (VALUES
+                ('FICTIONAL TEST CROFT A96T C110S', NULL, []::VARCHAR[]),
+                ('FICTIONAL TEST HOUSE A90T FICTIONAL TEST ROAD', NULL, []),
+                ('FICTIONAL TEST HOUSE A 952 TO B 9001', NULL, []),
+                ('FICTIONAL TEST FARM U36S B 992 TO A 947', NULL, []),
+                ('12 FICTIONAL TEST ROAD A96T C110S', NULL, ['12']),
+                ('12A FICTIONAL TEST ROAD B9001', NULL, ['12A']),
+                ('1-3 FICTIONAL TEST ROAD C110S', NULL, ['1-3']),
+                ('UNIT A12 7 FICTIONAL TEST ROAD A96T', NULL, ['A12', '7']),
+                ('FLAT B12 8 FICTIONAL TEST ROAD C110S', NULL, ['B12', '8']),
+                ('FLAT A 12 8 FICTIONAL TEST ROAD A 952', NULL, ['12', '8']),
+                ('UNIT C4 FICTIONAL TEST ROAD A90T', NULL, ['C4']),
+                ('PLOT U123A 6 FICTIONAL TEST ROAD C110S', NULL, ['U123A', '6']),
+                ('FLAT 2 18 FICTIONAL TEST ROAD A90', '2', ['18']),
+                ('A96T C110S 42 7 FICTIONAL TEST ROAD', NULL, ['42', '7']),
+                ('FICTIONAL TEST ROAD D12 X24', NULL, ['D12', 'X24']),
+                ('FICTIONAL TEST COTTAGE', NULL, []),
+                (NULL, NULL, NULL),
+                ('UNIT A12 UNIT B34 7 FICTIONAL TEST ROAD', NULL, ['A12', 'B34', '7']),
+                ('1 FICTIONAL TEST ROAD B12', NULL, ['1']),
+                ('12 A FICTIONAL TEST ROAD', NULL, ['12'])
+            ) AS source(clean_full_address, flat_letter, expected_numeric_tokens)
+        """)
+        result = _run_single_stage(_parse_out_numbers, source, connection)
+        assert (
+            result.filter("""
+            numeric_tokens IS DISTINCT FROM expected_numeric_tokens
+            OR clean_full_address IS DISTINCT FROM original_address
+        """).fetchall()
+            == []
+        )
+        assert result.count("*").fetchone()[0] == 20
+        assert "__numeric_token_address" not in result.columns
 
 
 def test_separate_unusual_tokens_preserves_source_order_for_frequency_ties():
