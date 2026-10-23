@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any, List, Literal
 
 from duckdb import DuckDBPyConnection, DuckDBPyRelation
 
-from uk_address_matcher._typing import StageDiagnostics
+from uk_address_matcher._typing import StageDiagnostics, _ColumnAlias
 from uk_address_matcher.analysis.accuracy_analysis import (
     build_match_weight_rounding_expression,
     build_precision_recall_chart_definition,
@@ -28,10 +28,45 @@ from uk_address_matcher.post_linkage.match_result.debug_tools import (
     _MatchResultDebugTools,
 )
 from uk_address_matcher.post_linkage.match_result.splink_inspector import _SplinkInspector
-from uk_address_matcher.sql_pipeline.helpers import _drop_table_and_registered_aliases
+from uk_address_matcher.sql_pipeline.helpers import (
+    _drop_table_and_registered_aliases,
+    _normalise_identifier_case,
+    _quote_identifier,
+)
 
 if TYPE_CHECKING:
     from uk_address_matcher.linking_model.matching.stages.splink import SplinkStage
+
+
+def _enrichment_columns(
+    selections: list[str | _ColumnAlias] | None,
+    source: str,
+) -> list[tuple[str, str]]:
+    if selections is None:
+        return []
+    if not isinstance(selections, list):
+        raise TypeError(
+            f"{source} must be a list of column names or alias dictionaries."
+        )
+    columns = []
+    for index, selection in enumerate(selections):
+        location = f"{source}[{index}]"
+        if isinstance(selection, str):
+            input_column = alias = selection
+        elif isinstance(selection, dict):
+            if set(selection) != {"input_column", "alias"}:
+                raise ValueError(
+                    f"{location} must contain exactly 'input_column' and 'alias'."
+                )
+            input_column, alias = selection["input_column"], selection["alias"]
+        else:
+            raise TypeError(f"{location} must be a column name or alias dictionary.")
+        if not isinstance(input_column, str) or not isinstance(alias, str):
+            raise TypeError(f"{location}: input_column and alias must be strings.")
+        if not input_column or not alias:
+            raise ValueError(f"{location}: input_column and alias must not be empty.")
+        columns.append((input_column, alias))
+    return columns
 
 
 def _build_threshold_metrics_sql(rounding_expr: str) -> str:
@@ -113,6 +148,88 @@ class MatchResult:
                 {", ".join(cols)}
             FROM ({base_relation_sql}) AS match_result
             """
+        )
+
+    def join_input_columns(
+        self,
+        *,
+        canonical: list[str | _ColumnAlias] | None = None,
+        messy: list[str | _ColumnAlias] | None = None,
+    ) -> DuckDBPyRelation:
+        """Left join selected fields from the retained prepared inputs.
+
+        Args:
+            canonical: Column names, or dictionaries containing `input_column`
+                and `alias`, from the matched canonical row.
+            messy: The same selections from the messy row.
+
+        Returns:
+            Standard match columns plus the selected fields.
+
+        Raises:
+            TypeError: If selections have invalid types.
+            ValueError: If selections are empty, invalid, unavailable or collide.
+
+        Example:
+            result.join_input_columns(
+                canonical=[
+                    "classificationcode",
+                    {"input_column": "postcode", "alias": "canonical_postcode"},
+                ]
+            )
+        """
+        selections = {
+            "canonical": _enrichment_columns(canonical, "canonical"),
+            "messy": _enrichment_columns(messy, "messy"),
+        }
+        if not any(selections.values()):
+            raise ValueError(
+                "No input columns were selected. Provide canonical or messy columns."
+            )
+        base = self.matches()
+        output_names = {
+            _normalise_identifier_case(column): [f"matches.{column}"]
+            for column in base.columns
+        }
+        projections = [f"matched.{_quote_identifier(column)}" for column in base.columns]
+        joins = []
+        for source, columns in selections.items():
+            if not columns:
+                continue
+            relation = getattr(self, f"_{source}_relation")
+            if relation is None:
+                raise ValueError(f"{source}: input data is unavailable")
+            match_key = (
+                "canonical_ukam_address_id"
+                if source == "canonical" else "ukam_address_id"
+            )
+            joins.append(
+                f"LEFT JOIN ({relation.sql_query()}) AS {source}_input "
+                f"ON {source}_input.ukam_address_id = matched.{match_key}"
+            )
+            for input_column, alias in columns:
+                output_names.setdefault(_normalise_identifier_case(alias), []).append(
+                    f"{source}.{input_column} AS {alias}"
+                )
+                projections.append(
+                    f"{source}_input.{_quote_identifier(input_column)} "
+                    f"AS {_quote_identifier(alias)}"
+                )
+        collisions = [
+            f"{name}: {', '.join(origins)}"
+            for name, origins in output_names.items()
+            if len(origins) > 1
+        ]
+        if collisions:
+            raise ValueError(
+                "Enrichment column name collisions:\n"
+                + "\n".join(collisions)
+                + '\nSupply distinct aliases using {"input_column": name, "alias": name}.'
+            )
+        return self.con.sql(
+            f"SELECT {', '.join(projections)} "
+            f"FROM ({self.matches(all_columns=True).sql_query()}) AS matched "
+            + " ".join(joins)
         )
 
     def close(self) -> None:

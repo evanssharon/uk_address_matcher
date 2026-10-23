@@ -165,6 +165,13 @@ def _quote_identifier(identifier: str) -> str:
     return '"' + identifier.replace('"', '""') + '"'
 
 
+def _normalise_identifier_case(identifier: str) -> str:
+    """Fold ASCII case to match DuckDB's identifier comparisons."""
+    return identifier.translate(
+        str.maketrans(string.ascii_uppercase, string.ascii_lowercase)
+    )
+
+
 def _relation_from_registered_alias(
     con: duckdb.DuckDBPyConnection,
     alias: str,
