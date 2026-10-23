@@ -239,9 +239,7 @@ def test_single_roadlike_batch_does_not_write_partition_files(
     assert list(tmp_path.iterdir()) == []
 
 
-def test_roadlike_default_prepares_at_most_128_districts_per_batch(
-    duck_con, monkeypatch
-):
+def test_roadlike_default_prepares_at_most_128_districts_per_batch(duck_con, monkeypatch):
     import uk_address_matcher.cleaning.chunking_strategies as chunking
 
     source = duck_con.sql("""

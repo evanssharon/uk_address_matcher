@@ -635,8 +635,8 @@ def _prepare_canonical_folder(
 ) -> None:
     from uk_address_matcher.cleaning.chunking_strategies import (
         _add_canonical_road_blocking_keys,
-        _derive_postcode_features,
         _attach_canonical_features,
+        _derive_postcode_features,
         _derive_term_frequencies_from_precleaned,
         clean_data_pre_term_frequencies,
         derive_inverted_index,
@@ -742,9 +742,12 @@ def _prepare_canonical_folder(
     )
 
     roadlike_places, local_features = _derive_postcode_features(
-        df_clean, con, include_local_keys=True,
+        df_clean,
+        con,
+        include_local_keys=True,
         include_road_catalogue=_derive_road_catalogue,
-        show_progress=progress_mode, _storage=_storage,
+        show_progress=progress_mode,
+        _storage=_storage,
     )
     road_features = None
     if _derive_road_catalogue:
@@ -760,8 +763,11 @@ def _prepare_canonical_folder(
         )
         logger.debug("Canonical road blocking keys derived")
     df_clean = _attach_canonical_features(
-        df_clean, con, local_features.alias,
-        road_features=road_features, _storage=_storage,
+        df_clean,
+        con,
+        local_features.alias,
+        road_features=road_features,
+        _storage=_storage,
     )
     canonical_output_relation = df_clean
     canonical_storage_relation = _canonical_storage_relation(canonical_output_relation)

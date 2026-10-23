@@ -270,21 +270,27 @@ def test_shared_road_batches_preserve_local_keys(con):
     expected_road_rows = expected_roads.order(road_columns).fetchall()
     with _CanonicalIntermediates(con) as storage:
         roads, keys = chunking_strategies._derive_postcode_features(
-            source, con, include_local_keys=True, postcode_districts_per_batch=1,
-            show_progress="off", _storage=storage,
+            source,
+            con,
+            include_local_keys=True,
+            postcode_districts_per_batch=1,
+            show_progress="off",
+            _storage=storage,
         )
         assert roads.order(road_columns).fetchall() == expected_road_rows
         columns = ", ".join(keys.columns)
         reference = con.table("shared_expected_keys").project(columns)
-        assert keys.order("ukam_address_id").fetchall() == reference.order(
-            "ukam_address_id"
-        ).fetchall()
+        assert (
+            keys.order("ukam_address_id").fetchall()
+            == reference.order("ukam_address_id").fetchall()
+        )
         enriched = chunking_strategies._attach_canonical_features(
             source, con, keys.alias, _storage=storage
         )
-        assert enriched.order("ukam_address_id").fetchall() == expected_keys.order(
-            "ukam_address_id"
-        ).fetchall()
+        assert (
+            enriched.order("ukam_address_id").fetchall()
+            == expected_keys.order("ukam_address_id").fetchall()
+        )
 
 
 def test_preparation_releases_consumed_source_chunks(con, tmp_path, monkeypatch):

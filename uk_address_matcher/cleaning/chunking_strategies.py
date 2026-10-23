@@ -388,9 +388,12 @@ def _postcode_batches(
             if districts_per_batch is not None:
                 batch_id = district_index // districts_per_batch
             elif (
-                batch_rows and batch_rows + alias_count > target_rows_per_batch
-                and (property_scope_column is None
-                     or district_index % _ROAD_FALLBACK_SCOPE_DISTRICTS == 0)
+                batch_rows
+                and batch_rows + alias_count > target_rows_per_batch
+                and (
+                    property_scope_column is None
+                    or district_index % _ROAD_FALLBACK_SCOPE_DISTRICTS == 0
+                )
             ):
                 batch_id += 1
                 batch_rows = 0
@@ -401,16 +404,23 @@ def _postcode_batches(
         total_batches = batch_ids[-1] + 1 if batch_ids else 0
         if not total_batches:
             return
-        con.execute(f"""
+        con.execute(
+            f"""
             CREATE TEMP TABLE {districts_table} AS
             SELECT unnest($districts::VARCHAR[]) AS district,
                 unnest($batch_ids::INTEGER[]) AS batch_id,
                 unnest($property_scopes::INTEGER[]) AS property_scope
-        """, {"districts": districts, "batch_ids": batch_ids,
-              "property_scopes": property_scopes})
+        """,
+            {
+                "districts": districts,
+                "batch_ids": batch_ids,
+                "property_scopes": property_scopes,
+            },
+        )
         scope_projection = (
             f", districts.property_scope AS {property_scope_column}"
-            if property_scope_column is not None else ""
+            if property_scope_column is not None
+            else ""
         )
         batch_sql = f"""
             SELECT source.* {scope_projection}, districts.batch_id AS {partition_column}
@@ -572,26 +582,33 @@ def _derive_postcode_features(
     if include_road_catalogue:
         batch_columns.append("numeric_tokens")
     narrow_source = con.sql(f"""
-        SELECT {', '.join(batch_columns)}
+        SELECT {", ".join(batch_columns)}
         FROM ({road_catalogue_source.sql_query()}) AS canonical
     """)
     progress = None
     processed_rows = 0
 
     try:
-        with closing(_postcode_batches(
-            narrow_source, con,
-            postcode_districts_per_batch=postcode_districts_per_batch,
-            property_scope_column=property_scope_column,
-        )) as batches:
+        with closing(
+            _postcode_batches(
+                narrow_source,
+                con,
+                postcode_districts_per_batch=postcode_districts_per_batch,
+                property_scope_column=property_scope_column,
+            )
+        ) as batches:
             for batch_index, (batch_input, total_batches) in enumerate(batches):
                 if progress is None:
                     log_stage_start(
-                        stage_label, total_rows, total_batches,
+                        stage_label,
+                        total_rows,
+                        total_batches,
                         progress_mode=progress_mode,
                     )
                     progress = _ProgressBar(
-                        label=stage_label, total=total_rows, total_units=total_batches,
+                        label=stage_label,
+                        total=total_rows,
+                        total_units=total_batches,
                         enabled=progress_mode == "auto",
                     )
                 batch_rows = batch_input.count("*").fetchone()[0]
@@ -606,10 +623,13 @@ def _derive_postcode_features(
                     )
                 if include_road_catalogue:
                     preparation = create_sql_pipeline(
-                        con, input_rel=batch_input,
-                        stage_specs=[_prepare_roadlike_place_input(
-                            property_scope_column=property_scope_column
-                        )],
+                        con,
+                        input_rel=batch_input,
+                        stage_specs=[
+                            _prepare_roadlike_place_input(
+                                property_scope_column=property_scope_column
+                            )
+                        ],
                         pipeline_name="Prepare roadlike-place input",
                     ).run(debug_options if batch_index == 0 else None)
                     candidate_sources_sql = roadlike_place_prepared_candidate_sources_sql(
@@ -617,14 +637,18 @@ def _derive_postcode_features(
                         property_scope_column=property_scope_column,
                     )
                     _materialise_relation(
-                        con, con.sql(f"""
+                        con,
+                        con.sql(f"""
                             SELECT address_id, {property_scope_column},
                                 full_postcode, postcode_district,
                                 rightmost_numeric_value, 0::INTEGER AS numeric_anchor,
                                 road_tail_tokens AS address_tokens,
                                 allow_truncated_windows
                             FROM ({candidate_sources_sql}) candidate_sources
-                        """), candidate_sources_table, _storage=_storage, temporary=True,
+                        """),
+                        candidate_sources_table,
+                        _storage=_storage,
+                        temporary=True,
                     )
                     candidate_relation = roadlike_place_prepared_candidate_sql(
                         candidate_sources_table,
@@ -632,9 +656,15 @@ def _derive_postcode_features(
                         property_scope_column=property_scope_column,
                     )
                     _materialise_relation(
-                        con, con.sql(roadlike_place_catalog_sql(
-                            f"({candidate_relation})", by_postcode_district=True
-                        )), catalogue_table, _storage=_storage, append=batch_index > 0,
+                        con,
+                        con.sql(
+                            roadlike_place_catalog_sql(
+                                f"({candidate_relation})", by_postcode_district=True
+                            )
+                        ),
+                        catalogue_table,
+                        _storage=_storage,
+                        append=batch_index > 0,
                     )
                     _drop_materialised_relation(con, candidate_sources_table, _storage)
 
@@ -1315,9 +1345,7 @@ def _canonical_local_key_features(
     con: DuckDBPyConnection,
     source: DuckDBPyRelation,
 ) -> DuckDBPyRelation:
-    inputs = source.project(
-        "ukam_address_id, unique_id, postcode, clean_full_address"
-    )
+    inputs = source.project("ukam_address_id, unique_id, postcode, clean_full_address")
     features = prepare_canonical_local_keys(con, inputs)
     return features.project("ukam_address_id, local_key_index")
 
@@ -1357,7 +1385,8 @@ def _attach_canonical_features(
             table_name = clustered_table
         feature_columns = con.table(table_name).columns
         source_columns = ", ".join(
-            f'"{column}"' for column in source.columns
+            f'"{column}"'
+            for column in source.columns
             if column == "ukam_address_id"
             or column not in (*feature_columns, "local_key_tokens")
         )

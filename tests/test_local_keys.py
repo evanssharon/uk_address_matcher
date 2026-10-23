@@ -46,11 +46,11 @@ def test_local_key_evidence_uses_canonical_postcode_rarity(duck_con, include_pos
     if not include_postcode:
         source = source.select("* EXCLUDE (postcode)")
     featured, _ = add_local_key_features(duck_con, source, canonical)
-    assert featured.select(
-        "ukam_address_id, lk_level_by_alias, lk_anchor_uprns"
-    ).order("ukam_address_id").fetchall() == [
+    assert featured.select("ukam_address_id, lk_level_by_alias, lk_anchor_uprns").order(
+        "ukam_address_id"
+    ).fetchall() == [
         ("literal", {"a1": 6}, ["001"]),
-          ("spacing", {"b1": 2}, []),
+        ("spacing", {"b1": 2}, []),
     ]
 
 
@@ -102,9 +102,12 @@ def test_source_key_eligibility_uses_numeric_tokens(duck_con, numeric_tokens, ha
     keys = prepared.select("local_key_tokens").fetchone()[0]
     assert bool(keys) is has_keys
     assert all(key["kind"] == "word" for key in keys)
-    assert prepare_source_local_keys(duck_con, prepared).select(
-        "local_key_tokens"
-    ).fetchone()[0] == keys
+    assert (
+        prepare_source_local_keys(duck_con, prepared)
+        .select("local_key_tokens")
+        .fetchone()[0]
+        == keys
+    )
 
 
 def _features(duck_con, text, canonical_rows):
@@ -137,10 +140,12 @@ def test_sql_feature_views_keep_parameter_bound_calls_independent(duck_con):
     first, _ = _features(duck_con, "MEADOW COTTAGE", canonical_rows)
     second, _ = _features(duck_con, "LAUREL GROVE", canonical_rows)
     assert first.select("lk_level_by_alias, lk_anchor_uprns").fetchone() == (
-        {"a1": 6}, ["001"]
+        {"a1": 6},
+        ["001"],
     )
     assert second.select("lk_level_by_alias, lk_anchor_uprns").fetchone() == (
-        {"b1": 6}, ["002"]
+        {"b1": 6},
+        ["002"],
     )
 
 

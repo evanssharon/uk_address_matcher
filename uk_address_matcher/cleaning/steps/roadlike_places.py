@@ -455,7 +455,9 @@ def roadlike_place_prepared_candidate_sql(
     )
     scope_match = (
         f"AND flags.{property_scope_column} IS NOT DISTINCT FROM "
-        f"valid.{property_scope_column}" if property_scope_column else ""
+        f"valid.{property_scope_column}"
+        if property_scope_column
+        else ""
     )
     block_candidate_pattern = sql_text(BLOCK_CANDIDATE_PATTERN)
     facility_candidate_pattern = sql_text(FACILITY_CANDIDATE_PATTERN)
