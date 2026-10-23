@@ -84,6 +84,16 @@ result = match_result.matches()
 print("=== First 10 matched records ===")
 result.limit(10).show(max_width=500)
 
+print("\n=== Matches enriched with input data ===")
+enriched_result = match_result.join_input_columns(
+    canonical=[
+        "clean_full_address",
+        {"input_column": "postcode", "alias": "canonical_input_postcode"},
+    ],
+    messy=[{"input_column": "postcode", "alias": "messy_input_postcode"}],
+)
+enriched_result.limit(10).show(max_width=500)
+
 # -----------------------------------------------------------------------------
 # Match-reason breakdown
 # -----------------------------------------------------------------------------

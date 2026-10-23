@@ -17,6 +17,7 @@
     options:
       members:
         - matches
+        - join_input_columns
         - export_labelling_bundle
         - match_metrics
         - accuracy_analysis
