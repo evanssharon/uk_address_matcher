@@ -45,9 +45,7 @@ def _enrichment_columns(
     if selections is None:
         return []
     if not isinstance(selections, list):
-        raise TypeError(
-            f"{source} must be a list of column names or alias dictionaries."
-        )
+        raise TypeError(f"{source} must be a list of column names or alias dictionaries.")
     columns = []
     for index, selection in enumerate(selections):
         location = f"{source}[{index}]"
@@ -201,7 +199,8 @@ class MatchResult:
                 raise ValueError(f"{source}: input data is unavailable")
             match_key = (
                 "canonical_ukam_address_id"
-                if source == "canonical" else "ukam_address_id"
+                if source == "canonical"
+                else "ukam_address_id"
             )
             joins.append(
                 f"LEFT JOIN ({relation.sql_query()}) AS {source}_input "

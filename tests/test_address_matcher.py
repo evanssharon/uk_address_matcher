@@ -211,7 +211,10 @@ def test_join_input_columns_mixed_selections_aliases_and_unmatched_rows(
     )
     assert isinstance(enriched, duckdb.DuckDBPyRelation)
     assert enriched.columns == result.matches().columns + [
-        "classificationcode", "canonical_customer_id", "customer_id", "messy_postcode"
+        "classificationcode",
+        "canonical_customer_id",
+        "customer_id",
+        "messy_postcode",
     ]
     assert enriched.order("customer_id").fetchall() == [
         ("M1", "SW1A 1AA", "exact", "RD", 7, 11, "one"),
@@ -275,7 +278,9 @@ def test_join_input_columns_quotes_identifiers_and_preserves_types(enrichment_re
         '"chosen ""floor" NULLS LAST, "Code"'
     )
     assert [str(data_type) for data_type in selected.types] == [
-        "INTEGER", "DECIMAL(4,2)", "VARCHAR"
+        "INTEGER",
+        "DECIMAL(4,2)",
+        "VARCHAR",
     ]
     assert selected.fetchall() == [(42, 1.25, "CO"), (42, 1.25, "RD"), (None, None, None)]
 
@@ -320,9 +325,12 @@ def test_join_input_columns_lifetime_is_scoped_to_each_result(
     assert first_relation.order("unique_id").fetchall() == first_rows
     first.close()
     first.close()
-    assert second.join_input_columns(canonical=canonical, messy=["customer_id"]).order(
-        "unique_id"
-    ).fetchall() == first_rows
+    assert (
+        second.join_input_columns(canonical=canonical, messy=["customer_id"])
+        .order("unique_id")
+        .fetchall()
+        == first_rows
+    )
     second.close()
     assert canonical_data.count("*").fetchone()[0] == 3
     assert messy_data.count("*").fetchone()[0] == 2
