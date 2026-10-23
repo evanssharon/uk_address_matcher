@@ -24,6 +24,36 @@ from uk_address_matcher.linking_model.splink_model import (
 from uk_address_matcher.sql_pipeline.runner import create_sql_pipeline
 
 
+@pytest.mark.parametrize("include_postcode", [False, True])
+def test_local_key_evidence_uses_canonical_postcode_rarity(duck_con, include_postcode):
+    canonical = duck_con.sql("""
+        SELECT * FROM (VALUES
+            ('001', 'a1', 'MEADOW COTTAGE', 'ZZ1 1ZZ'),
+            ('002', 'b1', 'ROSE BANK', 'ZZ1 1ZZ'),
+            ('003', 'c1', 'LAUREL GROVE', 'ZZ1 1ZZ'),
+            ('004', 'd1', 'MEADOW COTTAGE', 'ZZ2 1ZZ'),
+            ('005', 'e1', 'MEADOW COTTAGE', 'ZZ2 1ZZ'),
+            ('006', 'f1', 'LAUREL GROVE', 'ZZ2 1ZZ')
+        ) addresses(unique_id, ukam_address_id, clean_full_address, postcode)
+    """)
+    canonical = prepare_canonical_local_keys(duck_con, canonical)
+    source = duck_con.sql("""
+        SELECT *, 'WR9 9XX' AS postcode, []::VARCHAR[] AS numeric_tokens,
+            false AS has_flat_indicator, false AS has_business_unit
+        FROM (VALUES ('literal', 'MEADOW COTTAGE'), ('spacing', 'ROSEBANK'))
+            queries(ukam_address_id, clean_full_address)
+    """)
+    if not include_postcode:
+        source = source.select("* EXCLUDE (postcode)")
+    featured, _ = add_local_key_features(duck_con, source, canonical)
+    assert featured.select(
+        "ukam_address_id, lk_level_by_alias, lk_anchor_uprns"
+    ).order("ukam_address_id").fetchall() == [
+        ("literal", {"a1": 6}, ["001"]),
+          ("spacing", {"b1": 2}, []),
+    ]
+
+
 @pytest.mark.parametrize("numericless_only", [True, False])
 def test_preparation_keys_preserve_numeric_gaps(duck_con, numericless_only):
     addresses = duck_con.sql("""
@@ -72,7 +102,9 @@ def test_source_key_eligibility_uses_numeric_tokens(duck_con, numeric_tokens, ha
     keys = prepared.select("local_key_tokens").fetchone()[0]
     assert bool(keys) is has_keys
     assert all(key["kind"] == "word" for key in keys)
-    assert prepare_source_local_keys(duck_con, prepared) is prepared
+    assert prepare_source_local_keys(duck_con, prepared).select(
+        "local_key_tokens"
+    ).fetchone()[0] == keys
 
 
 def _features(duck_con, text, canonical_rows):
@@ -95,6 +127,21 @@ def _features(duck_con, text, canonical_rows):
         params={"rows": canonical_rows},
     )
     return add_local_key_features(duck_con, source, canonical)
+
+
+def test_sql_feature_views_keep_parameter_bound_calls_independent(duck_con):
+    canonical_rows = [
+        ["001", "a1", "MEADOW COTTAGE"],
+        ["002", "b1", "LAUREL GROVE"],
+    ]
+    first, _ = _features(duck_con, "MEADOW COTTAGE", canonical_rows)
+    second, _ = _features(duck_con, "LAUREL GROVE", canonical_rows)
+    assert first.select("lk_level_by_alias, lk_anchor_uprns").fetchone() == (
+        {"a1": 6}, ["001"]
+    )
+    assert second.select("lk_level_by_alias, lk_anchor_uprns").fetchone() == (
+        {"b1": 6}, ["002"]
+    )
 
 
 @pytest.mark.parametrize("text", ["54 MEADOW COTTAGE", "MEADOW COTTAGE 54"])
@@ -125,7 +172,7 @@ def test_numbered_sources_skip_canonical_key_preparation(duck_con, monkeypatch, 
     assert canonical.count("*").fetchone()[0] == 2
 
 
-def test_cached_canonical_statistics_rescope_filtered_background(duck_con):
+def test_canonical_statistics_recompute_filtered_population(duck_con):
     canonical = duck_con.sql("""
         SELECT * FROM (VALUES
             ('001', 'a1', 'MEADOW COTTAGE 54 TEST ROAD'),
@@ -136,7 +183,6 @@ def test_cached_canonical_statistics_rescope_filtered_background(duck_con):
         ) addresses(unique_id, ukam_address_id, clean_full_address)
     """).select("*, 'ZZ1 1ZZ' AS postcode")
     prepared = prepare_canonical_local_keys(duck_con, canonical)
-    assert prepare_canonical_local_keys(duck_con, prepared) is prepared
     assert prepared.count("*").fetchone()[0] == 5
     index = (
         prepared.filter("ukam_address_id = 'a1'").select("local_key_index").fetchone()[0]
@@ -158,14 +204,13 @@ def test_cached_canonical_statistics_rescope_filtered_background(duck_con):
     assert prepare_canonical_local_keys(duck_con, changed) is not changed
 
 
-def test_source_cleaning_precomputes_keys_and_checks_changed_text(duck_con):
+def test_source_cleaning_defers_keys_and_uses_current_text(duck_con):
     source = duck_con.sql("""
         SELECT 'query' AS unique_id, 'MEADOW COTTAGE' AS address_concat,
             'ZZ1 1ZZ' AS postcode
     """)
     cleaned = prepare_data_for_matching(source, duck_con, num_of_chunks=1)
-    assert "local_key_tokens" in cleaned.columns
-    assert prepare_source_local_keys(duck_con, cleaned) is cleaned
+    assert "local_key_tokens" not in cleaned.columns
     changed = cleaned.select("* REPLACE ('ORCHARD HOUSE' AS clean_full_address)")
     prepared = prepare_source_local_keys(duck_con, changed)
     keys = prepared.select("local_key_tokens").fetchone()[0]
@@ -175,13 +220,9 @@ def test_source_cleaning_precomputes_keys_and_checks_changed_text(duck_con):
     assert prepare_source_local_keys(duck_con, changed_numbers).select(
         "local_key_tokens"
     ).fetchone() == ([],)
-    legacy = cleaned.select("* REPLACE (1 AS local_key_token_version)")
-    assert prepare_source_local_keys(duck_con, legacy).select(
-        "local_key_token_version"
-    ).fetchone() == (2,)
 
 
-def test_spacing_rarity_counts_all_kinds_positions_and_numbered_properties(duck_con):
+def test_literal_rarity_counts_numbered_properties(duck_con):
     canonical = duck_con.sql("""
         SELECT * FROM (VALUES
             ('001', 'a1', 'ROSEBANK'),
@@ -192,27 +233,21 @@ def test_spacing_rarity_counts_all_kinds_positions_and_numbered_properties(duck_
         ) addresses(unique_id, ukam_address_id, clean_full_address)
     """).select("*, 'ZZ1 1ZZ' AS postcode")
     prepared = prepare_canonical_local_keys(duck_con, canonical)
-    assert prepared.aggregate("min(local_key_version)").fetchone()[0] == 4
-    assert prepare_canonical_local_keys(duck_con, prepared) is prepared
     index = (
         prepared.filter("ukam_address_id = 'a1'").select("local_key_index").fetchone()[0]
     )
     rosebank = next(key for key in index if key["key"] == "ROSEBANK")
-    assert (rosebank["spacing_df_uprns"], rosebank["n_uprns"]) == (3, 4)
+    assert (rosebank["df_uprns"], rosebank["n_uprns"]) == (2, 4)
     filtered = prepared.filter("unique_id NOT IN ('002', '003')")
     rebuilt = prepare_canonical_local_keys(duck_con, filtered)
     index = (
         rebuilt.filter("ukam_address_id = 'a1'").select("local_key_index").fetchone()[0]
     )
     rosebank = next(key for key in index if key["key"] == "ROSEBANK")
-    assert (rosebank["spacing_df_uprns"], rosebank["n_uprns"]) == (1, 2)
-    old_version = prepared.select("* REPLACE (1 AS local_key_version)")
-    upgraded = prepare_canonical_local_keys(duck_con, old_version)
-    assert upgraded is not old_version
-    assert upgraded.aggregate("min(local_key_version)").fetchone()[0] == 4
+    assert (rosebank["df_uprns"], rosebank["n_uprns"]) == (1, 2)
 
 
-def test_canonical_cache_keeps_only_evidential_prefix_keys(duck_con):
+def test_canonical_index_keeps_only_evidential_prefix_keys(duck_con):
     canonical = duck_con.sql("""
         SELECT * FROM (VALUES
             ('001', 'a1', 'MEADOW ROSEBANK'),
@@ -223,109 +258,14 @@ def test_canonical_cache_keeps_only_evidential_prefix_keys(duck_con):
     """).select("*, 'ZZ1 1ZZ' AS postcode")
     prepared = prepare_canonical_local_keys(duck_con, canonical)
     assert "local_key_tokens" not in prepared.columns
-    assert prepare_canonical_local_keys(duck_con, prepared) is prepared
     indexes = prepared.select("local_key_index").fetchall()
     for (index,) in indexes:
         for key in index:
             assert key["pos"] <= 3
             assert key["n_uprns"] == 4
             assert key["key"] != "MEADOW"
-            assert (key["df_uprns"] <= 3 and key["df_uprns"] / key["n_uprns"] <= 0.5) or (
-                key["spacing_df_uprns"] == 1 and len(key["key"].replace(" ", "")) >= 6
-            )
-    rosebank = next(key for key in indexes[0][0] if key["key"] == "ROSEBANK")
-    assert rosebank["spacing_df_uprns"] == 3
-
-
-@pytest.mark.parametrize(
-    "version,has_spacing_statistics", [(1, False), (2, False), (2, True), (3, True)]
-)
-def test_legacy_canonical_cache_upgrades_without_persisting_tokens(
-    duck_con, monkeypatch, version, has_spacing_statistics
-):
-    canonical = duck_con.sql("""
-        SELECT * FROM (VALUES
-            ('001', 'a1', 'MEADOW COTTAGE'),
-            ('002', 'b1', 'LAUREL GROVE')
-        ) addresses(unique_id, ukam_address_id, clean_full_address)
-    """).select("*, 'ZZ1 1ZZ' AS postcode")
-    prepared = prepare_canonical_local_keys(duck_con, canonical)
-    legacy = prepared.select(
-        f"* REPLACE ({version} AS local_key_version, "
-        "first(local_key_background[1] IGNORE NULLS) OVER (PARTITION BY postcode) "
-        "AS local_key_background), "
-        "[]::STRUCT(pos INTEGER, kind VARCHAR, key VARCHAR)[] AS local_key_tokens"
-    )
-    if not has_spacing_statistics:
-        legacy = legacy.select("""
-            * REPLACE (list_transform(local_key_index, occurrence -> struct_pack(
-                pos := occurrence.pos, kind := occurrence.kind, key := occurrence.key,
-                df_uprns := occurrence.df_uprns, n_uprns := occurrence.n_uprns
-            )) AS local_key_index)
-        """)
-    if version == 2 and has_spacing_statistics:
-        legacy = legacy.select("""
-            * REPLACE (list_concat(local_key_index, [
-                struct_pack(pos := 4, kind := 'word', key := 'LATE',
-                    df_uprns := 1::BIGINT, n_uprns := 2::BIGINT,
-                    spacing_df_uprns := 1::BIGINT),
-                struct_pack(pos := 1, kind := 'word', key := 'COMMON',
-                    df_uprns := 2::BIGINT, n_uprns := 2::BIGINT,
-                    spacing_df_uprns := 2::BIGINT)
-            ]) AS local_key_index)
-        """)
-
-    if version in (2, 3) and has_spacing_statistics:
-
-        def unexpected_statistics():
-            pytest.fail("Valid legacy statistics must not be recomputed")
-
-        monkeypatch.setattr(
-            "uk_address_matcher.cleaning.local_keys._canonical_local_key_statistics",
-            unexpected_statistics,
-        )
-    upgraded = prepare_canonical_local_keys(duck_con, legacy)
-    assert upgraded is not legacy
-    assert "local_key_tokens" not in upgraded.columns
-    assert upgraded.aggregate("min(local_key_version)").fetchone()[0] == 4
-    assert upgraded.order("ukam_address_id").fetchall() == (
-        prepared.order("ukam_address_id").fetchall()
-    )
-    assert prepare_canonical_local_keys(duck_con, upgraded) is upgraded
-
-
-@pytest.mark.parametrize("corruption", ["missing", "duplicate", "null", "filtered"])
-def test_postcode_background_is_stored_once_and_invalidates_when_corrupted(
-    duck_con, corruption
-):
-    canonical = duck_con.sql("""
-        SELECT * FROM (VALUES
-            ('001', 'a1', 'MEADOW COTTAGE', 'ZZ1 1ZZ'),
-            ('002', 'b1', 'LAUREL GROVE', 'ZZ1 1ZZ'),
-            ('003', 'c1', 'ROSEBANK', NULL),
-            ('004', 'd1', 'ORCHARD HOUSE', NULL)
-        ) addresses(unique_id, ukam_address_id, clean_full_address, postcode)
-    """)
-    prepared = prepare_canonical_local_keys(duck_con, canonical)
-    assert prepared.order("ukam_address_id").select(
-        "len(local_key_background)"
-    ).fetchall() == [(1,), (0,), (1,), (0,)]
-    assert prepare_canonical_local_keys(duck_con, prepared) is prepared
-    if corruption == "missing":
-        changed = prepared.select("* REPLACE ([] AS local_key_background)")
-    elif corruption == "duplicate":
-        changed = prepared.select("""
-            * REPLACE (list_concat(local_key_background, local_key_background)
-                AS local_key_background)
-        """)
-    elif corruption == "null":
-        changed = prepared.select("* REPLACE (NULL AS local_key_background)")
-    else:
-        changed = prepared.filter("ukam_address_id NOT IN ('a1', 'c1')")
-    rebuilt = prepare_canonical_local_keys(duck_con, changed)
-    assert rebuilt is not changed
-    assert rebuilt.aggregate("sum(len(local_key_background))").fetchone() == (2,)
-    assert prepare_canonical_local_keys(duck_con, rebuilt) is rebuilt
+            assert key["df_uprns"] <= 3
+            assert key["df_uprns"] / key["n_uprns"] <= 0.5
 
 
 def test_aliases_count_once_and_numbered_targets_remain(duck_con):

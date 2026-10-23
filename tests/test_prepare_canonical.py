@@ -12,6 +12,7 @@ import pytest
 
 from uk_address_matcher import prepare_canonical_folder
 from uk_address_matcher.cleaning import chunking_strategies
+from uk_address_matcher.cleaning.local_keys import prepare_canonical_local_keys
 from uk_address_matcher.cleaning.materialisation import (
     _CanonicalIntermediates,
     _input_has_collation,
@@ -218,6 +219,72 @@ def test_prepared_local_keys_span_cleaning_and_output_chunks(con, tmp_path):
     assert (meadow["df_uprns"], meadow["n_uprns"]) == (2, 4)
     manifest = json.loads((tmp_path / "ukam_manifest.json").read_text())
     assert "derive_local_keys" not in manifest["preparation_options"]
+
+
+def test_larger_road_batches_preserve_fallback_scope(con):
+    source = con.sql("""
+        SELECT *, regexp_extract_all(clean_full_address, '[0-9]+') AS numeric_tokens
+        FROM (
+            SELECT alias_id AS ukam_address_id,
+                CASE WHEN alias_id IN (1, 9) THEN 'shared-property'
+                    WHEN alias_id IN (2, 8) THEN NULL
+                    WHEN alias_id IN (3, 24) THEN 'second-property'
+                    ELSE alias_id::VARCHAR END AS unique_id,
+                'AB' || alias_id::VARCHAR || ' 1AA' AS postcode,
+                CASE WHEN alias_id IN (3, 8, 9) THEN '14 MYSTERY HAMLET'
+                    ELSE '12 HIGH STREET' END AS clean_full_address
+            FROM range(1, 25) rows(alias_id)
+        ) addresses
+    """)
+    expected = chunking_strategies.derive_roadlike_places(
+        source, con, postcode_districts_per_batch=16, show_progress="off"
+    )
+    columns = ", ".join(expected.columns)
+    expected_rows = expected.order(columns).fetchall()
+    assert any(row[1] == "MYSTERY HAMLET" for row in expected_rows)
+    actual = chunking_strategies.derive_roadlike_places(source, con, show_progress="off")
+    assert actual.order(columns).fetchall() == expected_rows
+
+
+def test_shared_road_batches_preserve_local_keys(con):
+    source = con.sql("""
+        SELECT *, 99 AS batch_id, ['KEPT', 'PAYLOAD'] AS extra_payload,
+            regexp_extract_all(clean_full_address, '[0-9]+') AS numeric_tokens
+        FROM (VALUES
+            (1, 'A', 'MEADOW COTTAGE 2 TEST ROAD', 'ZZ1 1ZZ'),
+            (2, 'A', 'MEADOW COTTAGE ALTERNATE 2 TEST ROAD', 'ZZ1 1ZZ'),
+            (3, 'B', 'MEADOW HOUSE 4 TEST ROAD', 'ZZ1 1ZZ'),
+            (4, 'C', 'PINE LODGE 6 DEMO ROAD', 'ZZ2 1ZZ'),
+            (5, 'D', 'ELM HALL', NULL),
+            (6, 'E', 'OAK LODGE', NULL),
+            (7, 'F', 'SYCAMORE COTTAGE', ''),
+            (8, 'G', 'ASH COTTAGE 8 SAMPLE ROAD', 'ZZ3 1ZZ')
+        ) addresses(ukam_address_id, unique_id, clean_full_address, postcode)
+    """)
+    expected_keys = prepare_canonical_local_keys(con, source)
+    expected_keys.create("shared_expected_keys")
+    expected_roads = chunking_strategies.derive_roadlike_places(
+        source, con, postcode_districts_per_batch=1, show_progress="off"
+    )
+    road_columns = ", ".join(expected_roads.columns)
+    expected_road_rows = expected_roads.order(road_columns).fetchall()
+    with _CanonicalIntermediates(con) as storage:
+        roads, keys = chunking_strategies._derive_postcode_features(
+            source, con, include_local_keys=True, postcode_districts_per_batch=1,
+            show_progress="off", _storage=storage,
+        )
+        assert roads.order(road_columns).fetchall() == expected_road_rows
+        columns = ", ".join(keys.columns)
+        reference = con.table("shared_expected_keys").project(columns)
+        assert keys.order("ukam_address_id").fetchall() == reference.order(
+            "ukam_address_id"
+        ).fetchall()
+        enriched = chunking_strategies._attach_canonical_features(
+            source, con, keys.alias, _storage=storage
+        )
+        assert enriched.order("ukam_address_id").fetchall() == expected_keys.order(
+            "ukam_address_id"
+        ).fetchall()
 
 
 def test_preparation_releases_consumed_source_chunks(con, tmp_path, monkeypatch):
@@ -587,6 +654,7 @@ def test_prepare_can_create_chunked_canonical_output(con, canonical_data, tmp_pa
 
 
 def test_prepare_sorts_canonical_parquet_for_compression(con, canonical_data, tmp_path):
+    con.execute("SET threads = 8")
     prepare_canonical_folder(
         canonical_data,
         output_folder=tmp_path,
@@ -601,6 +669,7 @@ def test_prepare_sorts_canonical_parquet_for_compression(con, canonical_data, tm
         ("M1 1AA", "C2"),
         ("SW1A 1AA", "C1"),
     ]
+    assert con.execute("SELECT current_setting('threads')").fetchone()[0] == 8
 
 
 @pytest.mark.parametrize("output_chunk_count", [1, 3])
@@ -1175,8 +1244,8 @@ def test_prepare_remote_csv_input_writes_remote_output(monkeypatch, add_debug_fe
     )
     monkeypatch.setattr(
         chunking_strategies,
-        "derive_roadlike_places",
-        lambda data, con, **kwargs: roadlike_places,
+        "_derive_postcode_features",
+        lambda data, con, **kwargs: (roadlike_places, clean_relation),
     )
     monkeypatch.setattr(
         chunking_strategies,
@@ -1185,10 +1254,10 @@ def test_prepare_remote_csv_input_writes_remote_output(monkeypatch, add_debug_fe
             inverted_relation
         ),
     )
-    name_statistics = MagicMock(return_value=clean_relation)
+    feature_attachment = MagicMock(return_value=clean_relation)
     monkeypatch.setattr(
-        "uk_address_matcher.prepare_canonical.prepare_canonical_local_keys",
-        name_statistics,
+        "uk_address_matcher.cleaning.chunking_strategies._attach_canonical_features",
+        feature_attachment,
     )
 
     prepare_canonical_folder(
@@ -1199,7 +1268,7 @@ def test_prepare_remote_csv_input_writes_remote_output(monkeypatch, add_debug_fe
         add_debug_features=add_debug_features,
     )
 
-    name_statistics.assert_called_once_with(con, clean_relation)
+    feature_attachment.assert_called_once()
     con.read_csv.assert_called_once_with("s3://bucket/input/canonical.csv")
 
     copy_sql = [
@@ -1309,8 +1378,8 @@ def test_prepare_remote_output_writes_chunked_paths(monkeypatch, add_debug_featu
     )
     monkeypatch.setattr(
         chunking_strategies,
-        "derive_roadlike_places",
-        lambda data, con, **kwargs: roadlike_places,
+        "_derive_postcode_features",
+        lambda data, con, **kwargs: (roadlike_places, clean_relation),
     )
     monkeypatch.setattr(
         chunking_strategies,
@@ -1319,10 +1388,10 @@ def test_prepare_remote_output_writes_chunked_paths(monkeypatch, add_debug_featu
             inverted_relation
         ),
     )
-    name_statistics = MagicMock(return_value=clean_relation)
+    feature_attachment = MagicMock(return_value=clean_relation)
     monkeypatch.setattr(
-        "uk_address_matcher.prepare_canonical.prepare_canonical_local_keys",
-        name_statistics,
+        "uk_address_matcher.cleaning.chunking_strategies._attach_canonical_features",
+        feature_attachment,
     )
 
     prepare_canonical_folder(
@@ -1333,7 +1402,7 @@ def test_prepare_remote_output_writes_chunked_paths(monkeypatch, add_debug_featu
         add_debug_features=add_debug_features,
     )
 
-    name_statistics.assert_called_once_with(con, clean_relation)
+    feature_attachment.assert_called_once()
     copy_sql = [
         call.args[0]
         for call in con.execute.call_args_list
