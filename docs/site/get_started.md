@@ -115,6 +115,28 @@ The examples below use the fictional London datasets from `ukam_datasets`, which
 | `.matches()` | DuckDB relation with `unique_id`, `resolved_canonical_id`, `match_reason`, and more. |
 | `.match_metrics()` | Match-reason breakdown with counts and percentages. |
 | `.accuracy_analysis()` | Threshold-based accuracy analysis from labelled data (requires `ukam_label` in messy input). |
+| `.join_input_columns(canonical=..., messy=...)` | Match results with explicitly selected input fields and optional aliases. |
+
+## Enriching matches with input data
+
+Select fields from the retained prepared inputs. Strings keep their names;
+dictionaries specify `input_column` and `alias`:
+
+```python
+enriched = result.join_input_columns(
+    canonical=[
+        "clean_full_address",
+        {"input_column": "postcode", "alias": "canonical_input_postcode"},
+    ],
+    messy=[{"input_column": "postcode", "alias": "messy_input_postcode"}],
+)
+enriched.limit(5).show()
+```
+
+Select at least one field. All output-name collisions raise a `ValueError`;
+nothing is overwritten or renamed automatically. Values come from prepared
+inputs, not raw copies. Unmatched rows retain NULL canonical fields. The lazy
+relation requires the result and connection to stay open.
 
 ## Exporting a labelling bundle
 
