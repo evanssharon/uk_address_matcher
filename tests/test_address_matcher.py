@@ -172,6 +172,162 @@ def test_match_result_has_expected_columns(con, canonical_data, messy_data):
     assert "postcode_canonical" in cols
 
 
+@pytest.fixture
+def enrichment_result(con):
+    matches = con.sql("""
+        SELECT * FROM (VALUES
+            ('M1', 1, 101, 'exact', 'SW1A 1AA'),
+            ('M1', 3, 102, 'exact', 'SW1A 1AA'),
+            ('M2', 2, NULL, NULL, 'M1 1AA')
+        ) AS t(unique_id, ukam_address_id, canonical_ukam_address_id,
+            match_reason, postcode)
+    """)
+    canonical = con.sql("""
+        SELECT * FROM (VALUES (101, 'C1', 'RD', 7), (102, 'C1', 'CO', 8))
+            AS t(ukam_address_id, unique_id, classificationcode, customer_id)
+    """)
+    messy = con.sql("""
+        SELECT * FROM (VALUES (1, 'one', 11), (2, 'two', 12), (3, 'three', 13))
+            AS t(ukam_address_id, postcode, customer_id)
+    """)
+    return MatchResult(
+        matches,
+        con=con,
+        _canonical_relation=canonical,
+        _messy_relation=messy,
+    )
+
+
+def test_join_input_columns_mixed_selections_aliases_and_unmatched_rows(
+    enrichment_result,
+):
+    result = enrichment_result
+    enriched = result.join_input_columns(
+        canonical=[
+            "classificationcode",
+            {"input_column": "customer_id", "alias": "canonical_customer_id"},
+        ],
+        messy=["customer_id", {"input_column": "postcode", "alias": "messy_postcode"}],
+    )
+    assert isinstance(enriched, duckdb.DuckDBPyRelation)
+    assert enriched.columns == result.matches().columns + [
+        "classificationcode", "canonical_customer_id", "customer_id", "messy_postcode"
+    ]
+    assert enriched.order("customer_id").fetchall() == [
+        ("M1", "SW1A 1AA", "exact", "RD", 7, 11, "one"),
+        ("M2", "M1 1AA", None, None, None, 12, "two"),
+        ("M1", "SW1A 1AA", "exact", "CO", 8, 13, "three"),
+    ]
+    assert result.matches().columns == ["unique_id", "postcode", "match_reason"]
+
+
+def test_join_input_columns_reports_all_output_collisions(enrichment_result):
+    with pytest.raises(ValueError) as error:
+        enrichment_result.join_input_columns(
+            canonical=["classificationcode", "classificationcode", "customer_id"],
+            messy=[
+                "customer_id",
+                {"input_column": "postcode", "alias": "POSTCODE"},
+            ],
+        )
+    message = str(error.value)
+    assert "postcode: matches.postcode" in message
+    assert "customer_id: canonical.customer_id" in message
+    assert "messy.customer_id" in message
+    assert "classificationcode: canonical.classificationcode" in message
+    assert "messy.postcode AS POSTCODE" in message
+
+
+@pytest.mark.parametrize(
+    "selection, exception",
+    [
+        ({"postcode": "alias"}, TypeError),
+        ([{}], ValueError),
+        ([{"input_column": 1, "alias": "other"}], TypeError),
+        ([{"input_column": "postcode", "alias": ""}], ValueError),
+    ],
+)
+def test_join_input_columns_rejects_invalid_selectors(
+    enrichment_result, selection, exception
+):
+    with pytest.raises(exception, match=r"canonical(?:\[0\])?"):
+        enrichment_result.join_input_columns(canonical=selection)
+
+
+def test_join_input_columns_requires_a_selection(enrichment_result):
+    with pytest.raises(ValueError, match="No input columns were selected"):
+        enrichment_result.join_input_columns()
+
+
+def test_join_input_columns_quotes_identifiers_and_preserves_types(enrichment_result):
+    result = enrichment_result
+    result._canonical_relation = result._canonical_relation.select(
+        '*, 42::INTEGER AS "floor ""number", 1.25::DECIMAL(4, 2) AS "select"'
+    )
+    enriched = result.join_input_columns(
+        canonical=[
+            {"input_column": 'floor "number', "alias": 'chosen "floor'},
+            {"input_column": "select", "alias": "group"},
+            {"input_column": "CLASSIFICATIONCODE", "alias": "Code"},
+        ],
+    )
+    selected = enriched.select('"chosen ""floor", "group", "Code"').order(
+        '"chosen ""floor" NULLS LAST, "Code"'
+    )
+    assert [str(data_type) for data_type in selected.types] == [
+        "INTEGER", "DECIMAL(4,2)", "VARCHAR"
+    ]
+    assert selected.fetchall() == [(42, 1.25, "CO"), (42, 1.25, "RD"), (None, None, None)]
+
+
+def test_join_input_columns_prepared_canonical_uses_supplied_dataset(
+    con, canonical_data, tmp_path
+):
+    folder = tmp_path / "prepared"
+    prepare_canonical_folder(
+        canonical_data, output_folder=folder, con=con, show_progress="off"
+    )
+    result = AddressMatcher(
+        folder,
+        _make_addresses(con, MESSY_RECORDS[:1]),
+        con=con,
+        stages=[ExactMatchStage()],
+        show_progress="off",
+    ).match()
+    assert result.join_input_columns(
+        canonical=[{"input_column": "unique_id", "alias": "source_canonical_id"}]
+    ).select("unique_id, source_canonical_id").fetchall() == [("M1", "C1")]
+    with pytest.raises(duckdb.BinderException, match="unavailable_upstream"):
+        result.join_input_columns(canonical=["unavailable_upstream"])
+
+
+def test_join_input_columns_lifetime_is_scoped_to_each_result(
+    con, canonical_data, messy_data
+):
+    matcher = AddressMatcher(
+        canonical_data.select("*, 'RD' AS classificationcode"),
+        messy_data.select("*, 11 AS customer_id"),
+        con=con,
+        stages=[ExactMatchStage()],
+        show_progress="off",
+    )
+    canonical = ["classificationcode"]
+    first = matcher.match()
+    first_relation = first.join_input_columns(canonical=canonical, messy=["customer_id"])
+    first_rows = first_relation.order("unique_id").fetchall()
+    second = matcher.match()
+    assert first._canonical_relation is not second._canonical_relation
+    assert first_relation.order("unique_id").fetchall() == first_rows
+    first.close()
+    first.close()
+    assert second.join_input_columns(canonical=canonical, messy=["customer_id"]).order(
+        "unique_id"
+    ).fetchall() == first_rows
+    second.close()
+    assert canonical_data.count("*").fetchone()[0] == 3
+    assert messy_data.count("*").fetchone()[0] == 2
+
+
 def test_lean_and_debug_prepared_canonical_matching_is_identical(
     con, canonical_data, messy_data, tmp_path
 ):
