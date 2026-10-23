@@ -284,10 +284,13 @@ def roadlike_place_prepared_input_sql(
     source_relation: str,
     *,
     use_precomputed_numeric_position: bool = False,
+    property_scope_column: str | None = None,
 ) -> str:
     """Prepare cleaned canonical rows for fast roadlike candidate extraction."""
     suffix_pattern = suffix_peel_regex_sql_literal()
     source_projection = "unique_id, clean_full_address, postcode, numeric_tokens"
+    if property_scope_column is not None:
+        source_projection += f", {property_scope_column}"
     precomputed_projection = (
         ", rightmost_numeric_position" if use_precomputed_numeric_position else ""
     )
@@ -342,15 +345,18 @@ def roadlike_place_prepared_input_sql(
     """
 
 
-def roadlike_place_prepared_candidate_sources_sql(source_relation: str) -> str:
+def roadlike_place_prepared_candidate_sources_sql(
+    source_relation: str, *, property_scope_column: str | None = None
+) -> str:
     """Build the shared source rows used by terminal and fallback candidates."""
+    scope_projection = f", {property_scope_column}" if property_scope_column else ""
     suffix_pattern = suffix_peel_regex_sql_literal()
     raw_text_pattern = sql_text(AMBIGUOUS_ADDRESS_PATTERN)
     facility_candidate_pattern = sql_text(FACILITY_CANDIDATE_PATTERN)
     return f"""
         WITH source_rows AS (
             SELECT
-                CAST(unique_id AS VARCHAR) AS address_id,
+                CAST(unique_id AS VARCHAR) AS address_id {scope_projection},
                 clean_full_address,
                 regexp_replace(
                     upper(coalesce(postcode, '')), '[^A-Z0-9]', '', 'g'
@@ -368,7 +374,7 @@ def roadlike_place_prepared_candidate_sources_sql(source_relation: str) -> str:
               AND rightmost_numeric_position IS NOT NULL
         ), facility_addresses AS (
             SELECT
-                address_id,
+                address_id {scope_projection},
                 full_postcode,
                 postcode_district,
                 numeric_tokens,
@@ -395,7 +401,7 @@ def roadlike_place_prepared_candidate_sources_sql(source_relation: str) -> str:
             FROM facility_addresses
         ), candidate_sources AS (
             SELECT
-                address_id,
+                address_id {scope_projection},
                 full_postcode,
                 postcode_district,
                 rightmost_numeric_value,
@@ -411,7 +417,7 @@ def roadlike_place_prepared_candidate_sources_sql(source_relation: str) -> str:
             WHERE NOT has_facility_clause
             UNION ALL
             SELECT
-                address_id,
+                address_id {scope_projection},
                 full_postcode,
                 postcode_district,
                 list_extract(address_tokens, numeric_anchor)
@@ -437,8 +443,22 @@ def roadlike_place_prepared_candidate_sql(
     catalogue_width_relation: str | None = None,
     candidate_source_relation: str | None = None,
     catalogue_has_district: bool = False,
+    property_scope_column: str | None = None,
 ) -> str:
     """Build terminal-first candidates from prepared canonical rows."""
+    scope_projection = f", {property_scope_column}" if property_scope_column else ""
+    source_scope_projection = (
+        f", source.{property_scope_column}" if property_scope_column else ""
+    )
+    candidate_scope_projection = (
+        f", candidate_sources.{property_scope_column}" if property_scope_column else ""
+    )
+    scope_match = (
+        f"AND flags.{property_scope_column} IS NOT DISTINCT FROM "
+        f"valid.{property_scope_column}"
+        if property_scope_column
+        else ""
+    )
     block_candidate_pattern = sql_text(BLOCK_CANDIDATE_PATTERN)
     facility_candidate_pattern = sql_text(FACILITY_CANDIDATE_PATTERN)
     road_terminal_pattern = sql_text(
@@ -462,7 +482,7 @@ def roadlike_place_prepared_candidate_sql(
                     AS phrase_allowed
             FROM fallback_candidate_windows
         ), valid_fallback_addresses AS (
-            SELECT DISTINCT address_id
+            SELECT DISTINCT address_id {scope_projection}
             FROM fallback_candidate_flags
             WHERE terminal_token IS NOT NULL AND phrase_allowed
         ), fallback_candidates AS (
@@ -470,6 +490,7 @@ def roadlike_place_prepared_candidate_sql(
             FROM fallback_candidate_flags AS flags
             SEMI JOIN valid_fallback_addresses AS valid
                 ON flags.address_id IS NOT DISTINCT FROM valid.address_id
+                {scope_match}
             WHERE phrase_allowed
               AND NOT regexp_matches(candidate_phrase, {block_candidate_pattern})
         )
@@ -529,7 +550,9 @@ def roadlike_place_prepared_candidate_sql(
     candidate_source_query = (
         f"SELECT * FROM {candidate_source_relation}"
         if candidate_source_relation is not None
-        else roadlike_place_prepared_candidate_sources_sql(source_relation)
+        else roadlike_place_prepared_candidate_sources_sql(
+            source_relation, property_scope_column=property_scope_column
+        )
     )
     source_cte_hint = "NOT MATERIALIZED" if candidate_source_relation is not None else ""
     district_scoped_templates = (
@@ -577,7 +600,7 @@ def roadlike_place_prepared_candidate_sql(
             WHERE ends.end_position - widths.width + 1 > numeric_anchor
         ), terminal_candidates AS (
             SELECT
-                source.address_id,
+                source.address_id {source_scope_projection},
                 source.full_postcode,
                 source.postcode_district,
                 source.rightmost_numeric_value,
@@ -587,11 +610,11 @@ def roadlike_place_prepared_candidate_sql(
                 USING (numeric_anchor, address_tokens{template_district_key})
             WHERE NOT regexp_matches(candidate_phrase, {facility_candidate_pattern})
         ), terminal_addresses AS (
-            SELECT DISTINCT address_id
+            SELECT DISTINCT address_id {scope_projection}
             FROM terminal_candidates
         ), fallback_candidate_windows AS (
             SELECT
-                candidate_sources.address_id,
+                candidate_sources.address_id {candidate_scope_projection},
                 full_postcode,
                 candidate_sources.postcode_district AS postcode_district,
                 rightmost_numeric_value,
@@ -612,7 +635,7 @@ def roadlike_place_prepared_candidate_sql(
                     address_tokens, starts.start_position + widths.width - 1
                 ) AS terminal_token
             FROM candidate_sources
-            ANTI JOIN terminal_addresses USING (address_id)
+            ANTI JOIN terminal_addresses USING (address_id {scope_projection})
             CROSS JOIN range(
                 numeric_anchor + 1, array_length(address_tokens) + 1
             ) AS starts(start_position)
@@ -1140,8 +1163,10 @@ def add_road_blocking_features(
     ),
     tags=["roadlike_places", "canonical_artifact"],
 )
-def _prepare_roadlike_place_input() -> str:
-    return roadlike_place_prepared_input_sql("{input}")
+def _prepare_roadlike_place_input(*, property_scope_column: str | None = None) -> str:
+    return roadlike_place_prepared_input_sql(
+        "{input}", property_scope_column=property_scope_column
+    )
 
 
 __all__ = [

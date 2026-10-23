@@ -17,15 +17,8 @@ def _address_for_parsing(address_expression: str) -> str:
 def _derive_local_key_tokens(*, numericless_only: bool = True):
     """Extract lexical keys without changing original token positions."""
     eligible = "clean_full_address IS NOT NULL"
-    token_hash = "hash(clean_full_address)"
     if numericless_only:
         eligible += " AND len(numeric_tokens) = 0"
-        token_hash = "hash(clean_full_address, len(numeric_tokens))"
-    lexical = (
-        "length(__local_tokens[position]) >= 2 "
-        "AND NOT regexp_matches(__local_tokens[position], '[0-9]')"
-    )
-    next_lexical = lexical.replace("[position]", "[position + 1]")
     return [
         CTEStep(
             "local_tokens",
@@ -37,13 +30,22 @@ def _derive_local_key_tokens(*, numericless_only: bool = True):
             """,
         ),
         CTEStep(
+            "lexical_flags",
+            """
+            SELECT input.*, list_transform(__local_tokens, token ->
+                length(token) >= 2 AND NOT regexp_matches(token, '[0-9]'))
+                AS __local_lexical
+            FROM {local_tokens} input
+            """,
+        ),
+        CTEStep(
             "final",
             f"""
-            SELECT * EXCLUDE (__local_tokens),
+            SELECT * EXCLUDE (__local_tokens, __local_lexical),
                 CASE WHEN {eligible} THEN list_concat(
                     list_transform(
                         list_filter(range(1, len(__local_tokens) + 1), position ->
-                            {lexical}
+                            __local_lexical[position]
                             AND __local_tokens[position] NOT IN (
                                 'THE','OF','TO','AT','NEAR','VIA','FROM','AND','WITH'
                             )
@@ -55,7 +57,7 @@ def _derive_local_key_tokens(*, numericless_only: bool = True):
                     ),
                     list_transform(
                         list_filter(range(1, len(__local_tokens)), position ->
-                            {lexical} AND {next_lexical}
+                            __local_lexical[position] AND __local_lexical[position + 1]
                             AND (__local_tokens[position] NOT IN (
                                     'THE','OF','TO','AT','NEAR','VIA','FROM','AND','WITH'
                                 )
@@ -71,11 +73,8 @@ def _derive_local_key_tokens(*, numericless_only: bool = True):
                         )
                     )
                 ) ELSE []::STRUCT(pos INTEGER, kind VARCHAR, key VARCHAR)[] END
-                    AS local_key_tokens,
-                {token_hash} AS local_key_token_hash,
-                2 AS local_key_token_version,
-                {str(numericless_only).lower()} AS local_key_numericless_only
-            FROM {{local_tokens}}
+                    AS local_key_tokens
+            FROM {{lexical_flags}}
             """,
         ),
     ]

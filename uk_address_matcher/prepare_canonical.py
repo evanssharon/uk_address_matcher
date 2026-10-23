@@ -12,7 +12,6 @@ from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from uk_address_matcher._typing import PrepareCanonicalInput
-from uk_address_matcher.cleaning.local_keys import prepare_canonical_local_keys
 from uk_address_matcher.cleaning.materialisation import (
     _CanonicalIntermediates,
     _input_has_collation,
@@ -79,10 +78,12 @@ class _ParquetArtefactSettings:
     row_group_size: int = 122_880
     sort_columns: tuple[str, ...] = ()
     order_by: tuple[str, ...] = ()
+    max_threads: int | None = None
 
 
 _STANDARD_PARQUET_SETTINGS = _ParquetArtefactSettings()
 _CANONICAL_PARQUET_SETTINGS = _ParquetArtefactSettings(
+    max_threads=4,
     sort_columns=(
         "postcode",
         "unique_id",
@@ -175,15 +176,25 @@ def _write_parquet_artefact(
     )
     order_clause = (" ORDER BY " + ", ".join(order_terms)) if order_terms else ""
     escaped_path = _escape_sql_string(str(path))
-    con.execute(
-        f"COPY (SELECT *{drop_clause} "
-        f"FROM ({relation.sql_query()}) AS _ukam_src{order_clause}) "
-        f"TO '{escaped_path}' "
-        f"(FORMAT PARQUET, PARQUET_VERSION {settings.version}, "
-        f"COMPRESSION {settings.compression}, "
-        f"COMPRESSION_LEVEL {settings.compression_level}, "
-        f"ROW_GROUP_SIZE {settings.row_group_size})"
-    )
+    original_threads = None
+    if settings.max_threads is not None:
+        original_threads = int(
+            con.execute("SELECT current_setting('threads')").fetchone()[0]
+        )
+        con.execute("SET threads = ?", [min(original_threads, settings.max_threads)])
+    try:
+        con.execute(
+            f"COPY (SELECT *{drop_clause} "
+            f"FROM ({relation.sql_query()}) AS _ukam_src{order_clause}) "
+            f"TO '{escaped_path}' "
+            f"(FORMAT PARQUET, PARQUET_VERSION {settings.version}, "
+            f"COMPRESSION {settings.compression}, "
+            f"COMPRESSION_LEVEL {settings.compression_level}, "
+            f"ROW_GROUP_SIZE {settings.row_group_size})"
+        )
+    finally:
+        if original_threads is not None:
+            con.execute("SET threads = ?", [original_threads])
 
 
 def _describe_prepare_input(data: PrepareCanonicalInput) -> str:
@@ -624,10 +635,11 @@ def _prepare_canonical_folder(
 ) -> None:
     from uk_address_matcher.cleaning.chunking_strategies import (
         _add_canonical_road_blocking_keys,
+        _attach_canonical_features,
+        _derive_postcode_features,
         _derive_term_frequencies_from_precleaned,
         clean_data_pre_term_frequencies,
         derive_inverted_index,
-        derive_roadlike_places,
         prepare_data_for_matching,
     )
 
@@ -729,15 +741,18 @@ def _prepare_canonical_folder(
         _storage=_storage,
     )
 
+    roadlike_places, local_features = _derive_postcode_features(
+        df_clean,
+        con,
+        include_local_keys=True,
+        include_road_catalogue=_derive_road_catalogue,
+        show_progress=progress_mode,
+        _storage=_storage,
+    )
+    road_features = None
     if _derive_road_catalogue:
-        logger.debug("Deriving canonical road catalogue and blocking keys")
-        roadlike_places = derive_roadlike_places(
-            df_clean,
-            con,
-            show_progress=progress_mode,
-            _storage=_storage,
-        )
-        df_clean = _add_canonical_road_blocking_keys(
+        logger.debug("Deriving canonical road blocking keys")
+        road_features = _add_canonical_road_blocking_keys(
             df_clean,
             con,
             num_of_chunks=num_of_chunks,
@@ -747,10 +762,13 @@ def _prepare_canonical_folder(
             _storage=_storage,
         )
         logger.debug("Canonical road blocking keys derived")
-    else:
-        roadlike_places = None
-
-    df_clean = prepare_canonical_local_keys(con, df_clean)
+    df_clean = _attach_canonical_features(
+        df_clean,
+        con,
+        local_features.alias,
+        road_features=road_features,
+        _storage=_storage,
+    )
     canonical_output_relation = df_clean
     canonical_storage_relation = _canonical_storage_relation(canonical_output_relation)
     canonical_storage_columns = [

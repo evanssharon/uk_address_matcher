@@ -239,34 +239,33 @@ def test_single_roadlike_batch_does_not_write_partition_files(
     assert list(tmp_path.iterdir()) == []
 
 
-def test_roadlike_default_prepares_at_most_sixteen_districts_per_batch(
-    duck_con, monkeypatch
-):
+def test_roadlike_default_prepares_at_most_128_districts_per_batch(duck_con, monkeypatch):
     import uk_address_matcher.cleaning.chunking_strategies as chunking
 
     source = duck_con.sql("""
         SELECT CAST(district AS VARCHAR) AS unique_id,
             '12 HIGH STREET' AS clean_full_address,
-            'AB' || CAST(district AS VARCHAR) || ' 1AA' AS postcode,
+            chr(65 + (district // 100)::INTEGER) || 'B'
+                || CAST(district % 100 AS VARCHAR) || ' 1AA' AS postcode,
             ['12'] AS numeric_tokens
-        FROM range(1, 18) AS districts(district)
+        FROM range(129) AS districts(district)
     """)
     batch_rows = []
     original = chunking.roadlike_place_prepared_candidate_sources_sql
 
-    def record_prepared_batch(table_name):
+    def record_prepared_batch(table_name, **kwargs):
         batch_rows.append(
             duck_con.sql(f"SELECT count(*) FROM {table_name}").fetchone()[0]
         )
-        return original(table_name)
+        return original(table_name, **kwargs)
 
     monkeypatch.setattr(
         chunking, "roadlike_place_prepared_candidate_sources_sql", record_prepared_batch
     )
     catalogue = derive_roadlike_places(source, duck_con, show_progress="off")
 
-    assert batch_rows == [16, 1]
-    assert catalogue.count("*").fetchone() == (17,)
+    assert batch_rows == [128, 1]
+    assert catalogue.count("*").fetchone() == (129,)
 
 
 def test_derive_roadlike_places_filters_before_district_batching(duck_con):

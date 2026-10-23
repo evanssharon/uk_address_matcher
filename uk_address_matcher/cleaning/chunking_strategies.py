@@ -1,21 +1,24 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Collection
+from collections.abc import Collection, Iterator
+from contextlib import closing
 from pathlib import Path
+from shutil import rmtree
 from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, Literal, Optional
 
 from duckdb import DuckDBPyConnection, DuckDBPyRelation
 
+from uk_address_matcher.cleaning.local_keys import prepare_canonical_local_keys
 from uk_address_matcher.cleaning.materialisation import (
     _CanonicalIntermediates,
     _input_has_collation,
+    _parquet_preserves_type,
 )
 from uk_address_matcher.cleaning.pipelines import (
     QUEUE_FOR_TF_DERIVATION,
     QUEUE_INVERTED_INDEX_SELF,
-    QUEUE_ROADLIKE_PLACE_PREPARATION,
     _clean_data_pre_term_frequencies,
     _clean_data_using_precomputed_rel_tok_freq,
     _create_term_frequency_tables,
@@ -34,6 +37,7 @@ from uk_address_matcher.cleaning.steps.inverted_index import (
     _lookup_keys_in_inverted_index,
 )
 from uk_address_matcher.cleaning.steps.roadlike_places import (
+    _prepare_roadlike_place_input,
     derive_top_1_road_keys,
     roadlike_place_catalog_sql,
     roadlike_place_prepared_candidate_sources_sql,
@@ -66,6 +70,9 @@ logger = logging.getLogger("uk_address_matcher")
 
 ROAD_SCORING_CHUNK_ROWS = 10_000_000
 _CANONICAL_ADJACENT_BATCH_ROWS = 4_000_000
+_CANONICAL_LOCAL_KEY_BATCH_ROWS = 1_000_000
+_ROAD_FALLBACK_SCOPE_DISTRICTS = 16
+_CANONICAL_POSTCODE_DISTRICTS_PER_BATCH = 128
 
 DISTINGUISHING_FEATURE_COLUMNS = (
     "distinguishing_adj_start_tokens",
@@ -319,13 +326,8 @@ def _add_canonical_road_blocking_keys(
         con.execute(
             f"SET preserve_insertion_order = {str(preserve_insertion_order).lower()}"
         )
-    source_columns = ", ".join(
-        f'canonical."{column}"' for column in canonical_addresses.columns
-    )
     enriched = con.sql(f"""
-        SELECT
-            {source_columns},
-            road_features.road_1_norm
+        SELECT canonical.*, road_features.road_1_norm
         FROM ({canonical_addresses.sql_query()}) AS canonical
         LEFT JOIN {road_keys_table} AS road_features USING (unique_id)
     """)
@@ -345,13 +347,135 @@ def _add_canonical_road_blocking_keys(
         )
 
 
+def _postcode_batches(
+    source: DuckDBPyRelation,
+    con: DuckDBPyConnection,
+    *,
+    postcode_districts_per_batch: int | None = None,
+    target_rows_per_batch: int = 125_000,
+    property_scope_column: str | None = None,
+) -> Iterator[tuple[DuckDBPyRelation, int]]:
+    """Materialise whole districts while retaining fixed road fallback groups."""
+    if postcode_districts_per_batch is not None and postcode_districts_per_batch < 1:
+        raise ValueError("postcode_districts_per_batch must be at least 1")
+    if target_rows_per_batch < 1:
+        raise ValueError("target_rows_per_batch must be at least 1")
+    districts_per_batch = postcode_districts_per_batch
+    if property_scope_column is not None and districts_per_batch is not None:
+        if districts_per_batch >= _ROAD_FALLBACK_SCOPE_DISTRICTS:
+            districts_per_batch -= districts_per_batch % _ROAD_FALLBACK_SCOPE_DISTRICTS
+    uid = _uid()
+    input_table = f"__ukam_postcode_input_{uid}"
+    districts_table = f"__ukam_postcode_districts_{uid}"
+    batch_table = f"__ukam_postcode_batch_input_{uid}"
+    partition_column = f"__ukam_postcode_batch_{uid}"
+    district_expression = (
+        "coalesce(nullif(regexp_extract(upper(coalesce(postcode, '')), "
+        "'^\\s*([A-Z]{1,2}[0-9]{1,2}[A-Z]?)\\s+\\d', 1), ''), '__UNKNOWN__')"
+    )
+    con.register(input_table, source)
+    try:
+        district_counts = con.sql(f"""
+            SELECT {district_expression} AS district, count(*) AS alias_count
+            FROM {input_table} GROUP BY district ORDER BY district
+        """).fetchall()
+        districts = []
+        batch_ids = []
+        property_scopes = []
+        batch_id = 0
+        batch_rows = 0
+        for district_index, (district, alias_count) in enumerate(district_counts):
+            if districts_per_batch is not None:
+                batch_id = district_index // districts_per_batch
+            elif (
+                batch_rows
+                and batch_rows + alias_count > target_rows_per_batch
+                and (
+                    property_scope_column is None
+                    or district_index % _ROAD_FALLBACK_SCOPE_DISTRICTS == 0
+                )
+            ):
+                batch_id += 1
+                batch_rows = 0
+            districts.append(district)
+            batch_ids.append(batch_id)
+            property_scopes.append(district_index // _ROAD_FALLBACK_SCOPE_DISTRICTS)
+            batch_rows += alias_count
+        total_batches = batch_ids[-1] + 1 if batch_ids else 0
+        if not total_batches:
+            return
+        con.execute(
+            f"""
+            CREATE TEMP TABLE {districts_table} AS
+            SELECT unnest($districts::VARCHAR[]) AS district,
+                unnest($batch_ids::INTEGER[]) AS batch_id,
+                unnest($property_scopes::INTEGER[]) AS property_scope
+        """,
+            {
+                "districts": districts,
+                "batch_ids": batch_ids,
+                "property_scopes": property_scopes,
+            },
+        )
+        scope_projection = (
+            f", districts.property_scope AS {property_scope_column}"
+            if property_scope_column is not None
+            else ""
+        )
+        batch_sql = f"""
+            SELECT source.* {scope_projection}, districts.batch_id AS {partition_column}
+            FROM {input_table} source JOIN {districts_table} districts
+                ON {district_expression} = districts.district
+        """
+        if total_batches == 1:
+            con.execute(f"""
+                CREATE TEMP TABLE {batch_table} AS
+                SELECT * EXCLUDE ({partition_column}) FROM ({batch_sql}) batches
+            """)
+            yield con.table(batch_table), total_batches
+            return
+        parquet_safe = all(_parquet_preserves_type(kind) for kind in source.types)
+        parquet_safe = parquet_safe and not _input_has_collation(con, source)
+        with TemporaryDirectory(prefix="ukam-postcode-batches-") as directory:
+            if parquet_safe:
+                escaped_directory = directory.replace("'", "''")
+                con.execute(f"""
+                    COPY ({batch_sql}) TO '{escaped_directory}'
+                    (FORMAT PARQUET, PARTITION_BY ({partition_column}),
+                        COMPRESSION SNAPPY)
+                """)
+            for batch_index in range(total_batches):
+                if parquet_safe:
+                    batch_directory = (
+                        Path(directory) / f"{partition_column}={batch_index}"
+                    )
+                    batch = con.read_parquet(
+                        str(batch_directory / "*.parquet"), hive_partitioning=False
+                    ).set_alias(f"{batch_table}_{batch_index}")
+                else:
+                    _drop_table_and_registered_aliases(con, batch_table)
+                    batch_query = f"""
+                        SELECT * EXCLUDE ({partition_column}) FROM ({batch_sql}) batches
+                        WHERE {partition_column} = {batch_index}
+                    """
+                    con.execute(f"CREATE TEMP TABLE {batch_table} AS {batch_query}")
+                    batch = con.table(batch_table)
+                yield batch, total_batches
+                if parquet_safe:
+                    rmtree(batch_directory)
+    finally:
+        _drop_table_and_registered_aliases(con, batch_table)
+        _drop_table_and_registered_aliases(con, districts_table)
+        _drop_table_and_registered_aliases(con, input_table)
+
+
 def derive_roadlike_places(
     canonical_address_table: DuckDBPyRelation,
     con: DuckDBPyConnection,
     output_path: Path | str | None = None,
     *,
     postcode_districts: Collection[str] | None = None,
-    postcode_districts_per_batch: int | None = 16,
+    postcode_districts_per_batch: int | None = _CANONICAL_POSTCODE_DISTRICTS_PER_BATCH,
     debug_options: Optional[DebugOptions] = None,
     show_progress: ShowProgress = "auto",
     _storage: _CanonicalIntermediates | None = None,
@@ -362,12 +486,46 @@ def derive_roadlike_places(
     and ``numeric_tokens``. Road preparation and candidate extraction run in
     batches of postcode districts; catalogue evidence is local to each district.
     ``postcode_districts`` restricts the source before batching.
+    Physical batches default to 128 districts; road fallback groups retain their
+    existing 16-district boundaries. Larger requested batches are rounded down
+    to a whole number of fallback groups.
     """
+    catalogue, _ = _derive_postcode_features(
+        canonical_address_table,
+        con,
+        output_path,
+        include_local_keys=False,
+        postcode_districts=postcode_districts,
+        postcode_districts_per_batch=postcode_districts_per_batch,
+        debug_options=debug_options,
+        show_progress=show_progress,
+        _storage=_storage,
+    )
+    return catalogue
+
+
+def _derive_postcode_features(
+    canonical_address_table: DuckDBPyRelation,
+    con: DuckDBPyConnection,
+    output_path: Path | str | None = None,
+    *,
+    include_local_keys: bool,
+    include_road_catalogue: bool = True,
+    postcode_districts: Collection[str] | None = None,
+    postcode_districts_per_batch: int | None = _CANONICAL_POSTCODE_DISTRICTS_PER_BATCH,
+    debug_options: Optional[DebugOptions] = None,
+    show_progress: ShowProgress = "auto",
+    _storage: _CanonicalIntermediates | None = None,
+) -> tuple[DuckDBPyRelation | None, DuckDBPyRelation | None]:
     selected_postcode_districts = _normalise_postcode_districts(postcode_districts)
     if postcode_districts_per_batch is not None and postcode_districts_per_batch < 1:
         raise ValueError("postcode_districts_per_batch must be at least 1")
 
-    required_columns = {"unique_id", "clean_full_address", "postcode", "numeric_tokens"}
+    required_columns = {"unique_id", "clean_full_address", "postcode"}
+    if include_local_keys:
+        required_columns.add("ukam_address_id")
+    if include_road_catalogue:
+        required_columns.add("numeric_tokens")
     missing_columns = sorted(required_columns.difference(canonical_address_table.columns))
     if missing_columns:
         raise ValueError(
@@ -391,141 +549,124 @@ def derive_roadlike_places(
             FROM ({canonical_address_table.sql_query()}) AS canonical
             WHERE {postcode_district_expression} IN ({district_values})
         """)
-        scoped_row_count = road_catalogue_source.count("*").fetchone()[0]
-        if scoped_row_count == 0:
+    total_rows = road_catalogue_source.count("*").fetchone()[0]
+    if total_rows == 0:
+        if selected_postcode_districts is not None:
             raise ValueError(
                 "No canonical addresses matched the supplied postcode districts"
             )
+        raise ValueError(
+            "Supplied address table has no records. Please provide a non-empty table."
+        )
+    if selected_postcode_districts is not None:
         logger.info(
             "Restricting road catalogue to %s postcode districts and %s rows",
             len(selected_postcode_districts),
-            scoped_row_count,
+            total_rows,
         )
 
     progress_mode = resolve_progress_mode(show_progress)
     uid = _uid()
-    district_table = f"__ukam_roadlike_districts_{uid}"
     candidate_sources_table = f"__ukam_roadlike_candidate_sources_{uid}"
     catalogue_table = f"__ukam_roadlike_places_{uid}"
-    total_rows = road_catalogue_source.count("*").fetchone()[0]
-    if total_rows == 0:
-        raise ValueError(
-            "Supplied address table has no records. Please provide a non-empty table."
-        )
+    local_key_table = f"__ukam_local_key_features_{uid}"
+    property_scope_column = f"__ukam_road_scope_{uid}" if include_road_catalogue else None
 
     if output_path is not None:
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
-    stage_label = "Building roadlike-place catalogue"
-    district_expression = (
-        "coalesce(nullif(regexp_extract(upper(coalesce(postcode, '')), "
-        "'^\\s*([A-Z]{1,2}[0-9]{1,2}[A-Z]?)\\s+\\d', 1), ''), '__UNKNOWN__')"
-    )
-    batch_size = postcode_districts_per_batch or 16
-    districts = con.sql(f"""
-        SELECT district,
-            (row_number() OVER (ORDER BY district) - 1) // {batch_size} AS batch_id
-        FROM (
-            SELECT DISTINCT {district_expression} AS district
-            FROM ({road_catalogue_source.sql_query()}) AS source
-        ) AS districts
+    stage_label = "Deriving canonical postcode features"
+    batch_columns = ["unique_id", "postcode", "clean_full_address"]
+    if include_local_keys:
+        batch_columns.insert(0, "ukam_address_id")
+    if include_road_catalogue:
+        batch_columns.append("numeric_tokens")
+    narrow_source = con.sql(f"""
+        SELECT {", ".join(batch_columns)}
+        FROM ({road_catalogue_source.sql_query()}) AS canonical
     """)
-    _materialise_relation(
-        con,
-        districts,
-        district_table,
-        _storage=_storage,
-        temporary=True,
-    )
-    total_batches = con.sql(f"SELECT max(batch_id) + 1 FROM {district_table}").fetchone()[
-        0
-    ]
-    log_stage_start(stage_label, total_rows, total_batches, progress_mode=progress_mode)
-    progress = _ProgressBar(
-        label=stage_label,
-        total=total_rows,
-        total_units=total_batches,
-        enabled=progress_mode == "auto",
-    )
+    progress = None
     processed_rows = 0
 
     try:
-        with TemporaryDirectory(prefix="ukam-road-batches-") as batch_directory:
-            batch_path = batch_directory.replace("'", "''")
-            precomputed_column = (
-                ", canonical.rightmost_numeric_position"
-                if "rightmost_numeric_position" in road_catalogue_source.columns
-                else ""
+        with closing(
+            _postcode_batches(
+                narrow_source,
+                con,
+                postcode_districts_per_batch=postcode_districts_per_batch,
+                property_scope_column=property_scope_column,
             )
-            if total_batches > 1:
-                con.execute(f"""
-                    COPY (
-                        SELECT canonical.unique_id, canonical.clean_full_address,
-                            canonical.postcode, canonical.numeric_tokens
-                            {precomputed_column}, batches.batch_id
-                        FROM ({road_catalogue_source.sql_query()}) AS canonical
-                        JOIN {district_table} AS batches
-                            ON {district_expression} = batches.district
-                    ) TO '{batch_path}' (FORMAT PARQUET, PARTITION_BY (batch_id))
-                """)
-            for batch_index in range(total_batches):
-                if total_batches == 1:
-                    batch_input = con.sql(f"""
-                        SELECT canonical.unique_id, canonical.clean_full_address,
-                            canonical.postcode, canonical.numeric_tokens
-                            {precomputed_column}
-                        FROM ({road_catalogue_source.sql_query()}) AS canonical
-                    """)
-                else:
-                    batch_files = (
-                        Path(batch_directory) / f"batch_id={batch_index}" / "*.parquet"
+        ) as batches:
+            for batch_index, (batch_input, total_batches) in enumerate(batches):
+                if progress is None:
+                    log_stage_start(
+                        stage_label,
+                        total_rows,
+                        total_batches,
+                        progress_mode=progress_mode,
                     )
-                    batch_file_pattern = str(batch_files).replace("'", "''")
-                    batch_input = con.sql(
-                        f"SELECT * FROM read_parquet('{batch_file_pattern}', "
-                        "hive_partitioning=false)"
+                    progress = _ProgressBar(
+                        label=stage_label,
+                        total=total_rows,
+                        total_units=total_batches,
+                        enabled=progress_mode == "auto",
                     )
                 batch_rows = batch_input.count("*").fetchone()[0]
-                preparation = create_sql_pipeline(
-                    con,
-                    input_rel=batch_input,
-                    stage_specs=QUEUE_ROADLIKE_PLACE_PREPARATION,
-                    pipeline_name="Prepare roadlike-place input",
-                    pipeline_description=(
-                        "Derive suffix-peeled tokens and numeric anchors"
-                    ),
-                ).run(debug_options if batch_index == 0 else None)
-                candidate_sources_sql = roadlike_place_prepared_candidate_sources_sql(
-                    f"({preparation.sql_query()})"
-                )
-                candidate_sources_sql = (
-                    "SELECT address_id, full_postcode, postcode_district, "
-                    "rightmost_numeric_value, 0::INTEGER AS numeric_anchor, "
-                    "road_tail_tokens AS address_tokens, allow_truncated_windows "
-                    f"FROM ({candidate_sources_sql}) AS candidate_sources"
-                )
-                _materialise_relation(
-                    con,
-                    con.sql(candidate_sources_sql),
-                    candidate_sources_table,
-                    _storage=_storage,
-                    temporary=True,
-                )
-                candidate_relation = roadlike_place_prepared_candidate_sql(
-                    candidate_sources_table,
-                    candidate_source_relation=candidate_sources_table,
-                )
-                catalogue_sql = roadlike_place_catalog_sql(
-                    f"({candidate_relation})", by_postcode_district=True
-                )
-                _materialise_relation(
-                    con,
-                    con.sql(catalogue_sql),
-                    catalogue_table,
-                    _storage=_storage,
-                    append=batch_index > 0,
-                )
-                _drop_materialised_relation(con, candidate_sources_table, _storage)
+                if include_local_keys:
+                    features = _canonical_local_key_features(con, batch_input)
+                    _materialise_relation(
+                        con,
+                        features,
+                        local_key_table,
+                        _storage=_storage,
+                        append=batch_index > 0,
+                    )
+                if include_road_catalogue:
+                    preparation = create_sql_pipeline(
+                        con,
+                        input_rel=batch_input,
+                        stage_specs=[
+                            _prepare_roadlike_place_input(
+                                property_scope_column=property_scope_column
+                            )
+                        ],
+                        pipeline_name="Prepare roadlike-place input",
+                    ).run(debug_options if batch_index == 0 else None)
+                    candidate_sources_sql = roadlike_place_prepared_candidate_sources_sql(
+                        f"({preparation.sql_query()})",
+                        property_scope_column=property_scope_column,
+                    )
+                    _materialise_relation(
+                        con,
+                        con.sql(f"""
+                            SELECT address_id, {property_scope_column},
+                                full_postcode, postcode_district,
+                                rightmost_numeric_value, 0::INTEGER AS numeric_anchor,
+                                road_tail_tokens AS address_tokens,
+                                allow_truncated_windows
+                            FROM ({candidate_sources_sql}) candidate_sources
+                        """),
+                        candidate_sources_table,
+                        _storage=_storage,
+                        temporary=True,
+                    )
+                    candidate_relation = roadlike_place_prepared_candidate_sql(
+                        candidate_sources_table,
+                        candidate_source_relation=candidate_sources_table,
+                        property_scope_column=property_scope_column,
+                    )
+                    _materialise_relation(
+                        con,
+                        con.sql(
+                            roadlike_place_catalog_sql(
+                                f"({candidate_relation})", by_postcode_district=True
+                            )
+                        ),
+                        catalogue_table,
+                        _storage=_storage,
+                        append=batch_index > 0,
+                    )
+                    _drop_materialised_relation(con, candidate_sources_table, _storage)
 
                 processed_rows += batch_rows
                 progress.update(processed_rows, completed_units=batch_index + 1)
@@ -538,23 +679,30 @@ def derive_roadlike_places(
                     chunk_index=batch_index,
                     total_chunks=total_batches,
                 )
-        if output_path is not None:
+        if output_path is not None and include_road_catalogue:
             escaped_output_path = str(output_path).replace("'", "''")
             con.execute(
                 f"COPY {catalogue_table} TO '{escaped_output_path}' "
                 "(FORMAT PARQUET, COMPRESSION ZSTD)"
             )
+    except BaseException:
+        _drop_materialised_relation(con, local_key_table, _storage)
+        _drop_materialised_relation(con, catalogue_table, _storage)
+        raise
     finally:
-        progress.close()
+        if progress is not None:
+            progress.close()
         _drop_materialised_relation(con, candidate_sources_table, _storage)
-        _drop_materialised_relation(con, district_table, _storage)
 
     log_stage_complete(
         stage_label,
         total_rows,
         progress_mode=progress_mode,
     )
-    return con.table(catalogue_table)
+    return (
+        con.table(catalogue_table) if include_road_catalogue else None,
+        con.table(local_key_table) if include_local_keys else None,
+    )
 
 
 def clean_data_pre_term_frequencies(
@@ -1191,6 +1339,94 @@ def derive_inverted_index(
             )
 
     return con.table(result_table)
+
+
+def _canonical_local_key_features(
+    con: DuckDBPyConnection,
+    source: DuckDBPyRelation,
+) -> DuckDBPyRelation:
+    inputs = source.project("ukam_address_id, unique_id, postcode, clean_full_address")
+    features = prepare_canonical_local_keys(con, inputs)
+    return features.project("ukam_address_id, local_key_index")
+
+
+def _attach_canonical_features(
+    source: DuckDBPyRelation,
+    con: DuckDBPyConnection,
+    table_name: str,
+    *,
+    road_features: DuckDBPyRelation | None = None,
+    _storage: _CanonicalIntermediates | None = None,
+) -> DuckDBPyRelation:
+    clustered_table = f"__ukam_local_key_clustered_{_uid()}"
+    enriched_table = f"__ukam_canonical_with_local_keys_{_uid()}"
+    original_table = table_name
+    try:
+        features = con.table(table_name)
+        if road_features is not None:
+            features = con.sql(f"""
+                SELECT local.ukam_address_id, road.road_1_norm,
+                    local.* EXCLUDE (ukam_address_id)
+                FROM {table_name} local
+                LEFT JOIN ({road_features.sql_query()}) road USING (ukam_address_id)
+            """)
+        if (
+            road_features is not None
+            or features.count("*").fetchone()[0] > _CANONICAL_LOCAL_KEY_BATCH_ROWS
+        ):
+            _materialise_relation(
+                con,
+                features,
+                clustered_table,
+                _storage=_storage,
+                order_by="ukam_address_id",
+            )
+            _drop_materialised_relation(con, table_name, _storage)
+            table_name = clustered_table
+        feature_columns = con.table(table_name).columns
+        source_columns = ", ".join(
+            f'"{column}"'
+            for column in source.columns
+            if column == "ukam_address_id"
+            or column not in (*feature_columns, "local_key_tokens")
+        )
+        canonical = con.sql(f"""
+            SELECT {source_columns} FROM ({source.sql_query()}) canonical
+        """)
+        first_id, last_id = con.sql(f"""
+            SELECT min(ukam_address_id), max(ukam_address_id)
+            FROM ({canonical.sql_query()}) canonical
+        """).fetchone()
+        if first_id is None:
+            first_id = last_id = 0
+        for index, start in enumerate(
+            range(first_id, last_id + 1, _CANONICAL_LOCAL_KEY_BATCH_ROWS)
+        ):
+            end = start + _CANONICAL_LOCAL_KEY_BATCH_ROWS - 1
+            chunk = con.sql(f"""
+                SELECT canonical.*, features.* EXCLUDE (ukam_address_id)
+                FROM ({canonical.sql_query()}) AS canonical
+                LEFT JOIN (
+                    SELECT * FROM {table_name}
+                    WHERE ukam_address_id BETWEEN {start} AND {end}
+                ) AS features USING (ukam_address_id)
+                WHERE canonical.ukam_address_id BETWEEN {start} AND {end}
+            """)
+            _materialise_relation(
+                con,
+                chunk,
+                enriched_table,
+                _storage=_storage,
+                append=index > 0,
+                order_by="ukam_address_id",
+            )
+        return con.table(enriched_table)
+    except BaseException:
+        _drop_materialised_relation(con, enriched_table, _storage)
+        raise
+    finally:
+        _drop_materialised_relation(con, original_table, _storage)
+        _drop_materialised_relation(con, clustered_table, _storage)
 
 
 def _canonical_distinguishing_features(
