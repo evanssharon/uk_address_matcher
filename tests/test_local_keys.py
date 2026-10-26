@@ -24,8 +24,11 @@ from uk_address_matcher.linking_model.splink_model import (
 from uk_address_matcher.sql_pipeline.runner import create_sql_pipeline
 
 
-@pytest.mark.parametrize("include_postcode", [False, True])
-def test_local_key_evidence_uses_canonical_postcode_rarity(duck_con, include_postcode):
+@pytest.mark.parametrize("postcode", ["ZZ1 1ZZ", "ZZ2 1ZZ", "WR9 9XX", None, "missing"])
+@pytest.mark.parametrize("prepared_index", [False, True])
+def test_local_key_evidence_uses_canonical_postcode_rarity(
+    duck_con, postcode, prepared_index
+):
     canonical = duck_con.sql("""
         SELECT * FROM (VALUES
             ('001', 'a1', 'MEADOW COTTAGE', 'ZZ1 1ZZ'),
@@ -36,22 +39,78 @@ def test_local_key_evidence_uses_canonical_postcode_rarity(duck_con, include_pos
             ('006', 'f1', 'LAUREL GROVE', 'ZZ2 1ZZ')
         ) addresses(unique_id, ukam_address_id, clean_full_address, postcode)
     """)
-    canonical = prepare_canonical_local_keys(duck_con, canonical)
-    source = duck_con.sql("""
-        SELECT *, 'WR9 9XX' AS postcode, []::VARCHAR[] AS numeric_tokens,
+    if prepared_index:
+        canonical = prepare_canonical_local_keys(duck_con, canonical)
+    source = duck_con.sql(
+        """
+        SELECT *, $postcode::VARCHAR AS postcode, []::VARCHAR[] AS numeric_tokens,
             false AS has_flat_indicator, false AS has_business_unit
         FROM (VALUES ('literal', 'MEADOW COTTAGE'), ('spacing', 'ROSEBANK'))
             queries(ukam_address_id, clean_full_address)
-    """)
-    if not include_postcode:
+    """,
+        params={"postcode": postcode},
+    )
+    if postcode == "missing":
         source = source.select("* EXCLUDE (postcode)")
     featured, _ = add_local_key_features(duck_con, source, canonical)
     assert featured.select("ukam_address_id, lk_level_by_alias, lk_anchor_uprns").order(
         "ukam_address_id"
     ).fetchall() == [
-        ("literal", {"a1": 6}, ["001"]),
-        ("spacing", {"b1": 2}, []),
+        ("literal", {"a1": 6}, ["001"]) if postcode == "ZZ1 1ZZ" else ("literal", {}, []),
+        ("spacing", {"b1": 2}, []) if postcode == "ZZ1 1ZZ" else ("spacing", {}, []),
     ]
+
+
+def test_local_key_lookup_avoids_expanding_unrelated_postcodes(duck_con):
+    duck_con.execute("SET memory_limit = '64MB'")
+    duck_con.execute("SET max_temp_directory_size = '0B'")
+    duck_con.execute("SET threads = 1")
+    canonical = duck_con.sql("""
+        SELECT address_id::VARCHAR AS ukam_address_id,
+            address_id::VARCHAR AS unique_id,
+            'ZZ' || (address_id // 2)::VARCHAR || ' 1ZZ' AS postcode,
+            CASE WHEN address_id % 2 = 0 THEN 'MEADOW COTTAGE'
+                ELSE 'ORCHARD HOUSE' END AS clean_full_address,
+            [struct_pack(pos := 1, kind := 'word',
+                key := CASE WHEN address_id % 2 = 0 THEN 'MEADOW' ELSE 'ORCHARD' END,
+                df_uprns := 1::UTINYINT, n_uprns := 2::UINTEGER),
+             struct_pack(pos := 2, kind := 'word',
+                key := CASE WHEN address_id % 2 = 0 THEN 'COTTAGE' ELSE 'HOUSE' END,
+                df_uprns := 1::UTINYINT, n_uprns := 2::UINTEGER),
+             struct_pack(pos := 1, kind := 'phrase',
+                key := clean_full_address,
+                df_uprns := 1::UTINYINT, n_uprns := 2::UINTEGER)] AS local_key_index
+        FROM range(200000) addresses(address_id)
+    """)
+    source = duck_con.sql("""
+        SELECT *, 'ZZ0 1ZZ' AS postcode, []::VARCHAR[] AS numeric_tokens,
+            false AS has_flat_indicator, false AS has_business_unit
+        FROM (VALUES ('literal', 'MEADOW COTTAGE'), ('spacing', 'MEADOWCOTTAGE'))
+            queries(ukam_address_id, clean_full_address)
+    """)
+    featured, returned_canonical = add_local_key_features(duck_con, source, canonical)
+    assert featured.select("ukam_address_id, lk_level_by_alias, lk_anchor_uprns").order(
+        "ukam_address_id"
+    ).fetchall() == [("literal", {"0": 6}, ["0"]), ("spacing", {"0": 2}, [])]
+    assert returned_canonical.count("*").fetchone()[0] == 200_000
+
+
+def test_canonical_local_key_statistics_are_materialised_once(duck_con):
+    duck_con.execute("""
+        CREATE TEMP TABLE canonical_key_input AS
+        SELECT *, 'ZZ1 1ZZ' AS postcode FROM (VALUES
+            ('001', 'a1', 'MEADOW COTTAGE'),
+            ('002', 'b1', 'ORCHARD HOUSE')
+        ) addresses(unique_id, ukam_address_id, clean_full_address)
+    """)
+    canonical = duck_con.table("canonical_key_input")
+    prepared = prepare_canonical_local_keys(duck_con, canonical)
+    columns = "ukam_address_id, local_key_index"
+    expected = prepared.select(columns).order("ukam_address_id").fetchall()
+    duck_con.execute("UPDATE canonical_key_input SET clean_full_address = 'CHANGED NAME'")
+    assert prepared.select(columns).order("ukam_address_id").fetchall() == expected
+    rebuilt = prepare_canonical_local_keys(duck_con, canonical)
+    assert rebuilt.select(columns).order("ukam_address_id").fetchall() != expected
 
 
 @pytest.mark.parametrize("numericless_only", [True, False])
@@ -130,6 +189,38 @@ def _features(duck_con, text, canonical_rows):
         params={"rows": canonical_rows},
     )
     return add_local_key_features(duck_con, source, canonical)
+
+
+def test_canonical_local_keys_do_not_materialise_unrelated_columns(duck_con):
+    memory_limit, threads, spill_limit = duck_con.execute("""
+        SELECT current_setting('memory_limit'), current_setting('threads'),
+            current_setting('max_temp_directory_size')
+    """).fetchone()
+    try:
+        duck_con.execute("SET memory_limit = '96MB'")
+        duck_con.execute("SET threads = 1")
+        duck_con.execute("SET max_temp_directory_size = '0B'")
+        canonical = duck_con.sql("""
+            SELECT address_id::VARCHAR AS unique_id,
+                address_id::VARCHAR AS ukam_address_id,
+                'ZZ' || (address_id // 2)::VARCHAR || ' 1ZZ' AS postcode,
+                CASE WHEN address_id % 2 = 0 THEN 'MEADOW COTTAGE'
+                    ELSE 'ORCHARD HOUSE' END AS clean_full_address,
+                repeat(md5(address_id::VARCHAR), 512) AS unrelated_payload
+            FROM range(12000) addresses(address_id)
+        """)
+        prepared = prepare_canonical_local_keys(duck_con, canonical)
+        assert prepared.aggregate("count(*), sum(len(local_key_index))").fetchone() == (
+            12000,
+            36000,
+        )
+        assert prepared.filter("ukam_address_id = '0'").select(
+            "length(unrelated_payload)"
+        ).fetchone() == (16384,)
+    finally:
+        duck_con.execute("SET memory_limit = ?", [memory_limit])
+        duck_con.execute("SET threads = ?", [threads])
+        duck_con.execute("SET max_temp_directory_size = ?", [spill_limit])
 
 
 def test_sql_feature_views_keep_parameter_bound_calls_independent(duck_con):

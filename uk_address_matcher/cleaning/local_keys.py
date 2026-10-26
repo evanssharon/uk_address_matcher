@@ -117,7 +117,8 @@ def prepare_canonical_local_keys(
     exclude = f" EXCLUDE ({', '.join(existing)})" if existing else ""
     con.execute(f"""
         CREATE TEMP VIEW "{table_name}_base" AS
-        SELECT *{exclude} FROM "{input_name}"
+        SELECT ukam_address_id, unique_id, postcode, clean_full_address
+        FROM "{input_name}"
     """)
     prepared = create_sql_pipeline(
         con,
@@ -128,7 +129,13 @@ def prepare_canonical_local_keys(
         ],
         pipeline_name="Prepare canonical postcode-wide keys",
     ).run()
-    con.execute(f'CREATE TEMP VIEW "{table_name}" AS {prepared.sql_query()}')
+    con.execute(f'CREATE TEMP TABLE "{table_name}_index" AS {prepared.sql_query()}')
+    con.execute(f"""
+        CREATE TEMP VIEW "{table_name}" AS
+        SELECT canonical.*{exclude}, features.local_key_index
+        FROM "{input_name}" canonical
+        LEFT JOIN "{table_name}_index" features USING (ukam_address_id)
+    """)
     return con.table(table_name)
 
 
@@ -149,6 +156,7 @@ def add_local_key_features(
     defaults = [
         f", NULL::{data_type} AS {column}"
         for column, data_type in (
+            ("postcode", "VARCHAR"),
             ("resolved_canonical_id", "VARCHAR"),
             ("has_flat_indicator", "BOOLEAN"),
             ("has_business_unit", "BOOLEAN"),
@@ -185,15 +193,21 @@ def add_local_key_features(
         con.execute(f"""
             CREATE TEMP VIEW "{source_keys_table}" AS
             SELECT DISTINCT ukam_address_id::VARCHAR AS alias_id,
-                occurrence.pos, occurrence.kind, occurrence.key
+                postcode, occurrence.pos, occurrence.kind, occurrence.key
             FROM ({source.sql_query()}) source,
                 UNNEST(local_key_tokens) entries(occurrence)
             WHERE {gate}
         """)
         con.execute(f"""
+            CREATE TEMP TABLE "{canonical_input}_keys" AS
+            SELECT ukam_address_id, unique_id, postcode, local_key_index
+            FROM "{canonical_input}"
+            WHERE postcode IN (SELECT postcode FROM "{source_keys_table}")
+        """)
+        con.execute(f"""
             CREATE TEMP TABLE "{spacing_table}" AS
             WITH spellings AS (
-                SELECT alias_id, key AS compact_key,
+                SELECT alias_id, postcode, key AS compact_key,
                     'phrase' AS kind,
                     left(key, split_at::INTEGER) || ' ' ||
                         substr(key, split_at::INTEGER + 1) AS spelling
@@ -201,7 +215,7 @@ def add_local_key_features(
                     UNNEST(range(2, length(key) - 1)) splits(split_at)
                 WHERE kind = 'word' AND pos <= 3 AND length(key) >= 6
                 UNION ALL
-                SELECT alias_id, replace(key, ' ', '') AS compact_key,
+                SELECT alias_id, postcode, replace(key, ' ', '') AS compact_key,
                     'word' AS kind, replace(key, ' ', '') AS spelling
                 FROM "{source_keys_table}"
                 WHERE kind = 'phrase' AND pos <= 3
@@ -211,10 +225,11 @@ def add_local_key_features(
                 canonical.ukam_address_id::VARCHAR AS canonical_alias_id,
                 canonical.unique_id::VARCHAR AS entity_id,
                 canonical.postcode, source.compact_key
-            FROM "{canonical_input}" canonical,
+            FROM "{canonical_input}_keys" canonical,
                 UNNEST(local_key_index) entries(occurrence)
             JOIN spellings source
-                ON occurrence.kind = source.kind AND occurrence.key = source.spelling
+                ON canonical.postcode = source.postcode
+                AND occurrence.kind = source.kind AND occurrence.key = source.spelling
             WHERE {_canonical_local_key_gate("occurrence.")}
         """)
         spacing_source = con.sql(f"""
@@ -235,7 +250,7 @@ def add_local_key_features(
             ), canonical_keys AS MATERIALIZED (
                 SELECT DISTINCT ukam_address_id::VARCHAR AS alias_id,
                     unique_id::VARCHAR AS entity_id, postcode, occurrence.*
-                FROM "{canonical_input}" canonical,
+                FROM "{canonical_input}_keys" canonical,
                     UNNEST(local_key_index) entries(occurrence)
                 WHERE occurrence.pos <= 3
                     AND occurrence.key IN (SELECT key FROM source_keys)
@@ -245,7 +260,8 @@ def add_local_key_features(
                     canonical.entity_id AS uprn, source.pos AS source_position,
                     source.kind, canonical.df_uprns
                 FROM source_keys source JOIN canonical_keys canonical
-                    ON source.kind = canonical.kind AND source.key = canonical.key
+                    ON source.postcode = canonical.postcode
+                    AND source.kind = canonical.kind AND source.key = canonical.key
                 WHERE canonical.n_uprns >= 2 AND canonical.df_uprns <= 3
                     AND canonical.df_uprns::DOUBLE / canonical.n_uprns <= 0.5
             ), literal_levels AS MATERIALIZED (
