@@ -86,12 +86,10 @@ if ! command -v uv >/dev/null 2>&1; then
     exit 1
 fi
 
-# Check we are on the main branch
+# Create the release branch from the current named branch
 CURRENT_BRANCH=$(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD)
-if [[ "$CURRENT_BRANCH" != "main" ]]; then
-    log_error "You must be on the 'main' branch to create a release"
-    log_error "Current branch: $CURRENT_BRANCH"
-    log_info "Switch to main with: git checkout main"
+if [[ "$CURRENT_BRANCH" == "HEAD" ]]; then
+    log_error "You must be on a named branch to create a release"
     exit 1
 fi
 
@@ -102,25 +100,10 @@ if ! git -C "$REPO_ROOT" diff --quiet || ! git -C "$REPO_ROOT" diff --cached --q
     exit 1
 fi
 
-# Check that local main is up to date with remote
-log_info "Fetching latest changes from origin..."
+# Fetch remote refs for release branch and tag collision checks
+log_info "Fetching remote refs from origin..."
 if ! git -C "$REPO_ROOT" fetch origin --quiet 2>/dev/null; then
     log_error "Could not fetch from origin"
-    exit 1
-fi
-
-LOCAL_COMMIT=$(git -C "$REPO_ROOT" rev-parse HEAD)
-# Use ls-remote to get the actual remote HEAD for main, avoiding worktree issues
-REMOTE_COMMIT=$(git -C "$REPO_ROOT" ls-remote origin refs/heads/main 2>/dev/null | cut -f1 || echo "")
-if [[ -z "$REMOTE_COMMIT" ]]; then
-    log_error "Could not find origin/main"
-    exit 1
-fi
-if [[ "$LOCAL_COMMIT" != "$REMOTE_COMMIT" ]]; then
-    log_error "Your local main branch is not up to date with origin/main"
-    log_error "Local:  $LOCAL_COMMIT"
-    log_error "Remote: $REMOTE_COMMIT"
-    log_info "Run 'git pull origin main' to update"
     exit 1
 fi
 
@@ -166,7 +149,8 @@ if [[ ! $REPLY =~ ^[Yy]$ ]]; then
     exit 0
 fi
 
-# Create the release branch before changing the version files
+# Create the release branch from the current branch before changing versions
+log_info "Using current branch as release base: $CURRENT_BRANCH"
 log_info "Creating release branch: $RELEASE_BRANCH"
 git -C "$REPO_ROOT" checkout -b "$RELEASE_BRANCH"
 
