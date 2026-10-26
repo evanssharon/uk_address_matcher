@@ -43,7 +43,7 @@ databases, or joblib files.
 ## Train
 
 ```bash
-uv run python -m uk_address_matcher.model_training.all_sector_model \
+uv run python -m dev_scripts.model_training.all_sector_model \
   --cache-path /secure/path/canonical_addresses.parquet \
   --output-dir /secure/path/all_sector_road_identifier \
   --threads 4 \
@@ -111,21 +111,21 @@ The experiment expects a canonical residential/commercial cache Parquet with at 
 Run the ranker first, then the optional gate:
 
 ```bash
-uv run python -m uk_address_matcher.model_training.all_sector_model \
+uv run python -m dev_scripts.model_training.all_sector_model \
   --cache-path /secure/path/canonical_residential_commercial_addresses.parquet \
   --output-dir /secure/path/all_sector_road_identifier \
   --threads 4 \
   --memory-limit 16GB
 
-uv run python -m uk_address_matcher.model_training.all_sector_reachability_gate \
+uv run python -m dev_scripts.model_training.all_sector_reachability_gate \
   --database-path /secure/path/all_sector_road_identifier/all_sector_road_identifier.duckdb \
   --output-dir /secure/path/all_sector_reachability_gate
 
-uv run python -m uk_address_matcher.model_training.listwise_reranker \
+uv run python -m dev_scripts.model_training.listwise_reranker \
   --database-path /secure/path/all_sector_road_identifier/all_sector_road_identifier.duckdb \
   --output-dir /secure/path/all_sector_listwise_reranker_v1
 
-uv run python -m uk_address_matcher.model_training.listwise_reranker_gate \
+uv run python -m dev_scripts.model_training.listwise_reranker_gate \
   --source-database-path /secure/path/all_sector_road_identifier/all_sector_road_identifier.duckdb \
   --reranker-model-path /secure/path/all_sector_listwise_reranker_v1/models/listwise_reranker.joblib \
   --output-dir /secure/path/all_sector_listwise_reranker_gate_v1

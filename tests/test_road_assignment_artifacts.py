@@ -4,11 +4,11 @@ import json
 
 import duckdb
 
-from uk_address_matcher.model_training.additive_pairwise_road_assignment import (
+from dev_scripts.model_training.additive_pairwise_road_assignment import (
     ADDITIVE_FEATURES,
 )
-from uk_address_matcher.model_training.linear_road_assignment import FoldedLogisticModel
-from uk_address_matcher.model_training.road_assignment_artifacts import (
+from dev_scripts.model_training.linear_road_assignment import FoldedLogisticModel
+from dev_scripts.model_training.road_assignment_artifacts import (
     DEFAULT_EXCLUDED_CLASSIFICATION_PREFIXES,
     build_catalog,
     canonical_candidate_sql,

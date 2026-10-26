@@ -1,26 +1,16 @@
 #!/bin/bash
 #
-# Bump package version and create a GitHub release.
+# Bump package version and push a release branch.
 #
 # Usage:
 #   chmod +x ./shell/bump_release_version.sh
-#   ./shell/bump_release_version.sh <new_version> [--prerelease]
+#   ./shell/bump_release_version.sh <new_version>
 #
-# Examples:
+# Example:
 #   ./shell/bump_release_version.sh 1.0.0
-#   ./shell/bump_release_version.sh 1.0.1.dev1 --prerelease
 #
-# Requirements:
-#   - GitHub CLI (gh) must be installed and authenticated
-#   - sed (BSD or GNU)
-#
-# Note on branch protection:
-#   If your repository has branch protection rules preventing direct pushes to
-#   main, this script will update the version files locally and commit them,
-#   but the push will fail. In that case:
-#     1. Create a feature branch with the version bump commit
-#     2. Open a PR and merge it
-#     3. After merging, run: gh release create v<version> --generate-notes
+# The script updates the package version and uv.lock, commits the changes to
+# release/<version>, and pushes that branch for review. It does not publish.
 
 set -euo pipefail
 
@@ -31,15 +21,12 @@ YELLOW='\033[1;33m'
 NC='\033[0m' # No Colour
 
 usage() {
-    echo "Usage: $0 <new_version> [--prerelease]"
+    echo "Usage: $0 <new_version>"
     echo ""
     echo "Arguments:"
     echo "  new_version   The new version string (e.g., 1.0.0 or 1.0.1.dev1)"
-    echo "  --prerelease  Mark the GitHub release as a pre-release"
-    echo ""
     echo "Examples:"
     echo "  $0 1.0.0"
-    echo "  $0 1.0.1.dev1 --prerelease"
     exit 1
 }
 
@@ -56,7 +43,7 @@ log_error() {
 }
 
 # Check arguments
-if [[ $# -lt 1 ]]; then
+if [[ $# -ne 1 ]]; then
     usage
 fi
 
@@ -66,11 +53,6 @@ if [[ "$1" == "--help" || "$1" == "-h" ]]; then
 fi
 
 NEW_VERSION="$1"
-PRERELEASE=false
-
-if [[ $# -ge 2 && "$2" == "--prerelease" ]]; then
-    PRERELEASE=true
-fi
 
 # Validate version format (basic check)
 if [[ ! "$NEW_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(\..+)?$ ]]; then
@@ -85,6 +67,8 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 INIT_FILE="$REPO_ROOT/uk_address_matcher/__init__.py"
 PYPROJECT_FILE="$REPO_ROOT/pyproject.toml"
+UV_LOCK_FILE="$REPO_ROOT/uv.lock"
+RELEASE_BRANCH="release/$NEW_VERSION"
 
 # Verify files exist
 if [[ ! -f "$INIT_FILE" ]]; then
@@ -97,12 +81,15 @@ if [[ ! -f "$PYPROJECT_FILE" ]]; then
     exit 1
 fi
 
-# Check we are on the main branch
+if ! command -v uv >/dev/null 2>&1; then
+    log_error "uv is required to update uv.lock"
+    exit 1
+fi
+
+# Create the release branch from the current named branch
 CURRENT_BRANCH=$(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD)
-if [[ "$CURRENT_BRANCH" != "main" ]]; then
-    log_error "You must be on the 'main' branch to create a release"
-    log_error "Current branch: $CURRENT_BRANCH"
-    log_info "Switch to main with: git checkout main"
+if [[ "$CURRENT_BRANCH" == "HEAD" ]]; then
+    log_error "You must be on a named branch to create a release"
     exit 1
 fi
 
@@ -113,22 +100,22 @@ if ! git -C "$REPO_ROOT" diff --quiet || ! git -C "$REPO_ROOT" diff --cached --q
     exit 1
 fi
 
-# Check that local main is up to date with remote
-log_info "Fetching latest changes from remote..."
+# Fetch remote refs for release branch and tag collision checks
+log_info "Fetching remote refs from origin..."
 if ! git -C "$REPO_ROOT" fetch origin --quiet 2>/dev/null; then
-    log_warn "Could not fetch from origin - skipping remote sync check"
-    log_warn "Make sure your local main branch is up to date before proceeding"
-else
-    LOCAL_COMMIT=$(git -C "$REPO_ROOT" rev-parse HEAD)
-    # Use ls-remote to get the actual remote HEAD for main, avoiding worktree issues
-    REMOTE_COMMIT=$(git -C "$REPO_ROOT" ls-remote origin refs/heads/main 2>/dev/null | cut -f1 || echo "")
-    if [[ -n "$REMOTE_COMMIT" && "$LOCAL_COMMIT" != "$REMOTE_COMMIT" ]]; then
-        log_error "Your local main branch is not up to date with origin/main"
-        log_error "Local:  $LOCAL_COMMIT"
-        log_error "Remote: $REMOTE_COMMIT"
-        log_info "Run 'git pull origin main' to update"
-        exit 1
-    fi
+    log_error "Could not fetch from origin"
+    exit 1
+fi
+
+# Check that the release branch does not already exist
+if git -C "$REPO_ROOT" show-ref --verify --quiet "refs/heads/$RELEASE_BRANCH"; then
+    log_error "Branch '$RELEASE_BRANCH' already exists locally"
+    exit 1
+fi
+
+if git -C "$REPO_ROOT" ls-remote --exit-code --heads origin "$RELEASE_BRANCH" >/dev/null 2>&1; then
+    log_error "Branch '$RELEASE_BRANCH' already exists on remote"
+    exit 1
 fi
 
 # Check if the tag already exists (locally or remotely)
@@ -161,6 +148,11 @@ if [[ ! $REPLY =~ ^[Yy]$ ]]; then
     log_warn "Aborted by user"
     exit 0
 fi
+
+# Create the release branch from the current branch before changing versions
+log_info "Using current branch as release base: $CURRENT_BRANCH"
+log_info "Creating release branch: $RELEASE_BRANCH"
+git -C "$REPO_ROOT" checkout -b "$RELEASE_BRANCH"
 
 # Bump version in __init__.py
 log_info "Updating $INIT_FILE..."
@@ -198,83 +190,30 @@ fi
 
 log_info "Version files updated successfully"
 
+# Refresh the project lockfile for the new package version
+log_info "Updating uv.lock..."
+if ! (cd "$REPO_ROOT" && uv lock); then
+    log_error "Failed to update uv.lock"
+    exit 1
+fi
+if [[ ! -f "$UV_LOCK_FILE" ]]; then
+    log_error "uv lock completed without creating $UV_LOCK_FILE"
+    exit 1
+fi
+
 # Commit changes
 log_info "Committing version bump..."
-git -C "$REPO_ROOT" add "$INIT_FILE" "$PYPROJECT_FILE"
+git -C "$REPO_ROOT" add "$INIT_FILE" "$PYPROJECT_FILE" "$UV_LOCK_FILE"
 git -C "$REPO_ROOT" commit -m "chore: bump version to $NEW_VERSION"
 
-# Check if gh CLI is available
-if ! command -v gh &> /dev/null; then
-    log_warn "GitHub CLI (gh) is not installed"
-    log_warn "Skipping GitHub release creation"
-    log_info "To create the release manually, push and run:"
-    echo "  git push origin main"
-    echo "  # Then create the release via GitHub web UI"
-    exit 0
-fi
-
-# Check if gh is authenticated
-if ! gh auth status &> /dev/null; then
-    log_warn "GitHub CLI is not authenticated"
-    log_warn "Run 'gh auth login' to authenticate"
-    log_warn "Skipping GitHub release creation"
-    log_info "Don't forget to push your changes: git push origin main"
-    exit 0
-fi
-
-# Ask user if they want to create a GitHub release
-echo ""
-read -p "Do you want to push and create a GitHub release? (y/N) " -n 1 -r
-echo ""
-if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-    log_info "Skipping GitHub release creation"
-    log_info "Don't forget to push your changes:"
-    echo "  git push origin main"
-    exit 0
-fi
-
-# Push changes (this might fail due to branch protection)
-log_info "Pushing changes to remote..."
-if ! git -C "$REPO_ROOT" push; then
-    log_error "Failed to push changes directly (likely due to branch protection)"
-    log_warn "Your version bump has been committed locally but not pushed."
-    log_info ""
-    log_info "To complete the release with branch protection:"
-    echo "  1. Create a feature branch: git checkout -b release/v$NEW_VERSION"
-    echo "  2. Push the branch: git push -u origin release/v$NEW_VERSION"
-    echo "  3. Open a PR and merge it to main"
-    echo "  4. After merging, create the release:"
-    echo "     gh release create v$NEW_VERSION --target main --generate-notes"
-    if [[ "$PRERELEASE" == true ]]; then
-        echo "     (add --prerelease flag for pre-release)"
-    fi
+log_info "Pushing release branch..."
+if ! git -C "$REPO_ROOT" push --set-upstream origin "$RELEASE_BRANCH"; then
+    log_error "Failed to push '$RELEASE_BRANCH'"
+    log_warn "The version bump is committed locally on '$RELEASE_BRANCH'."
+    log_info "Push it manually with: git -C '$REPO_ROOT' push --set-upstream origin '$RELEASE_BRANCH'"
     exit 1
 fi
 
-# Create GitHub release
-TAG_NAME="v$NEW_VERSION"
-log_info "Creating GitHub release: $TAG_NAME"
-
-RELEASE_OPTS=(
-    "$TAG_NAME"
-    --title "$TAG_NAME"
-    --generate-notes
-)
-
-if [[ "$PRERELEASE" == true ]]; then
-    RELEASE_OPTS+=(--prerelease)
-    log_info "Marking as pre-release"
-fi
-
-if gh release create "${RELEASE_OPTS[@]}"; then
-    log_info "GitHub release created successfully: $TAG_NAME"
-    log_info "View at: $(gh release view "$TAG_NAME" --json url -q .url)"
-else
-    log_error "Failed to create GitHub release"
-    log_warn "This may be due to branch protection rules"
-    log_info "You can create the release manually via the GitHub web interface"
-    log_info "Or try running: gh release create $TAG_NAME --title '$TAG_NAME' --generate-notes"
-    exit 1
-fi
-
+log_info "Release branch pushed: $RELEASE_BRANCH"
+log_info "Open a pull request for review; publication is not performed by this script."
 log_info "Version bump complete!"

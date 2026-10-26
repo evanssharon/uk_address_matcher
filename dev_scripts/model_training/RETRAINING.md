@@ -61,7 +61,7 @@ Production uses the separately evaluated tree-rule-distilled additive scorecard.
 Start with a bounded smoke run:
 
 ```bash
-uv run python -m uk_address_matcher.model_training.all_sector_model \
+uv run python -m dev_scripts.model_training.all_sector_model \
   --cache-path /secure/path/cache.parquet \
   --output-dir /secure/path/road_identifier_smoke \
   --row-limit 5000
@@ -70,7 +70,7 @@ uv run python -m uk_address_matcher.model_training.all_sector_model \
 Then use a new output directory for the complete corpus:
 
 ```bash
-uv run python -m uk_address_matcher.model_training.all_sector_model \
+uv run python -m dev_scripts.model_training.all_sector_model \
   --cache-path /secure/path/cache.parquet \
   --output-dir /secure/path/road_identifier \
   --threads 4 \
