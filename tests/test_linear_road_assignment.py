@@ -7,21 +7,21 @@ import pytest
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 
-from uk_address_matcher.model_training.additive_pairwise_road_assignment import (
+from dev_scripts.model_training.additive_pairwise_road_assignment import (
     ADDITIVE_FEATURE_COLUMNS,
     _pairwise_training_frame as _additive_pairwise_training_frame,
     _select_precision_policy,
     _threshold_curve,
     additive_feature_sql,
 )
-from uk_address_matcher.model_training.all_sector_model import FEATURE_COLUMNS
-from uk_address_matcher.model_training.linear_road_assignment import (
+from dev_scripts.model_training.all_sector_model import FEATURE_COLUMNS
+from dev_scripts.model_training.linear_road_assignment import (
     FoldedLogisticModel,
     _top_one_metrics,
     fold_logistic_model,
     logistic_logit_sql,
 )
-from uk_address_matcher.model_training.tree_rule_scorecard import (
+from dev_scripts.model_training.tree_rule_scorecard import (
     TreeRule,
     TreeRuleCondition,
     rule_feature_definitions,
